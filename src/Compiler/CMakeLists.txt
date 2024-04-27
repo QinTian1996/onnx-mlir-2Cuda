@@ -150,6 +150,7 @@ set_property(SOURCE CompilerUtils.cpp APPEND PROPERTY COMPILE_DEFINITIONS ${DEFI
 
 add_onnx_mlir_library(OMCompilerUtils
   CompilerUtils.cpp
+#  OnnxIREmitCuda.cpp
   HeapReporter.cpp
 
   EXCLUDE_FROM_OM_LIBS
@@ -201,7 +202,7 @@ add_onnx_mlir_library(OMCompilerUtils
 # CompilerUtils does not require cruntime or jniruntime to build,
 # however, they are required for execution when using the EmitLib or EmitJNI
 # options
-add_dependencies(OMCompilerUtils cruntime)
+#add_dependencies(OMCompilerUtils cruntime)
 if (ONNX_MLIR_ENABLE_JNI)
   add_dependencies(OMCompilerUtils jniruntime)
 endif()
@@ -231,26 +232,26 @@ if (NOT BUILD_SHARED_LIBS)
   target_compile_definitions(OMCompiler PUBLIC ONNX_MLIR_BUILT_AS_STATIC)
 endif()
 
-pybind11_add_module(PyCompile PyOMCompileSession.cpp)
-add_dependencies(PyCompile onnx_proto)
-target_compile_options(PyCompile
-  PRIVATE
-  $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:-frtti -fexceptions>
-  $<$<CXX_COMPILER_ID:MSVC>:/EHsc /GR>
-  )
-target_compile_definitions(PyCompile
-  PRIVATE
-  $<TARGET_PROPERTY:onnx,COMPILE_DEFINITIONS>
-  )
-target_include_directories(PyCompile
-  PRIVATE
-  $<TARGET_PROPERTY:onnx,INCLUDE_DIRECTORIES>
-  )
-target_link_libraries(PyCompile
-  PRIVATE
-  OMCompiler
-  )
-
-install(TARGETS PyCompile
-  DESTINATION lib
-  )
+#pybind11_add_module(PyCompile PyOMCompileSession.cpp)
+#add_dependencies(PyCompile onnx_proto)
+#target_compile_options(PyCompile
+#  PRIVATE
+#  $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:-frtti -fexceptions>
+#  $<$<CXX_COMPILER_ID:MSVC>:/EHsc /GR>
+#  )
+#target_compile_definitions(PyCompile
+#  PRIVATE
+#  $<TARGET_PROPERTY:onnx,COMPILE_DEFINITIONS>
+#  )
+#target_include_directories(PyCompile
+#  PRIVATE
+#  $<TARGET_PROPERTY:onnx,INCLUDE_DIRECTORIES>
+#  )
+#target_link_libraries(PyCompile
+#  PRIVATE
+#  OMCompiler
+#  )
+#
+#install(TARGETS PyCompile
+#  DESTINATION lib
+#  )

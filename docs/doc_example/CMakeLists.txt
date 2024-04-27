@@ -77,19 +77,19 @@ add_onnx_mlir_executable(OMRuntimeTest
 
 set_output_directory(OMRuntimeTest BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR} LIBRARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
-add_onnx_mlir_executable(OMRuntimeCppTest
-  main.cpp
-
-  NO_INSTALL
-
-  INCLUDE_DIRS PRIVATE
-  ${ONNX_MLIR_SRC_ROOT}/include
-
-  LINK_LIBS PRIVATE
-  OMCompiler
-  OMExecutionSession
-  )
-
+#add_onnx_mlir_executable(OMRuntimeCppTest
+#  main.cpp
+#
+#  NO_INSTALL
+#
+#  INCLUDE_DIRS PRIVATE
+#  ${ONNX_MLIR_SRC_ROOT}/include
+#
+#  LINK_LIBS PRIVATE
+#  OMCompiler
+#  OMExecutionSession
+#  )
+#
 set_output_directory(OMRuntimeCppTest BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR} LIBRARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 add_test(NAME OMRuntimeTest COMMAND OMRuntimeTest WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

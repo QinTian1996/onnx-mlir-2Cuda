@@ -865,9 +865,43 @@ static int setupModule(mlir::OwningOpRef<ModuleOp> &module,
   return CompilerSuccess;
 }
 
+void printOperationsInModule(ModuleOp moduleOp) {
+    // 获取ModuleOp的第一个也是唯一一个区域
+    Region &region = moduleOp.getRegion();
+
+    // 遍历区域中的所有块
+    for (Block &block : region) {
+        // 遍历块中的所有操作
+        for (Operation &op : block) {
+            // 打印操作的名称
+            llvm::outs() << "Operation Name: " << op.getName().getStringRef().str() << "\n";
+            // 这里可以根据需要对每个Operation进行进一步处理
+        }
+    }
+}
+
+
+void recursivePrintOpName(Operation *op, int depth = 0) {
+    // 打印当前操作的名字，前面加上缩进以展示层级关系
+    llvm::outs().indent(depth * 2) << op->getName().getStringRef().str() << "\n";
+
+    // 遍历当前操作的所有子区域（如果有）
+    for (Region &region : op->getRegions()) {
+        // 遍历每个区域中的所有块
+        for (Block &block : region) {
+            // 对块中的每个操作递归调用此函数
+            for (Operation &childOp : block) {
+                recursivePrintOpName(&childOp, depth + 1);
+            }
+        }
+    }
+}
+
 static int emitOutput(mlir::OwningOpRef<ModuleOp> &module,
     mlir::MLIRContext &context, std::string outputNameNoExt,
     mlir::PassManager &pm, EmissionTargetType emissionTarget) {
+  
+  recursivePrintOpName(module.get(), 0);
   if (printIR) {
     outputModule(module, llvm::outs());
     return CompilerSuccess;
