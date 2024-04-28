@@ -150,7 +150,7 @@ set_property(SOURCE CompilerUtils.cpp APPEND PROPERTY COMPILE_DEFINITIONS ${DEFI
 
 add_onnx_mlir_library(OMCompilerUtils
   CompilerUtils.cpp
-#  OnnxIREmitCuda.cpp
+  OnnxIREmitCuda.cpp
   HeapReporter.cpp
 
   EXCLUDE_FROM_OM_LIBS

@@ -16,6 +16,8 @@
 
 #include "src/Compiler/CompilerOptions.hpp"
 #include "src/Compiler/CompilerUtils.hpp"
+#include "src/Compiler/OnnxIREmitCuda.hpp"
+
 #include "src/Version/Version.hpp"
 #include "llvm/Support/Debug.h"
 
@@ -71,6 +73,9 @@ int main(int argc, char *argv[]) {
     LLVM_DEBUG(llvm::dbgs() << "multithreading is disabled\n");
   }
   loadDialects(context);
+
+
+  mlir::registerToCudaTranslation();
 
   mlir::OwningOpRef<mlir::ModuleOp> module;
   std::string errorMessage;

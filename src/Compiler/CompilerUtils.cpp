@@ -44,6 +44,7 @@
 #include "src/Compiler/CompilerOptions.hpp"
 #include "src/Compiler/CompilerPasses.hpp"
 #include "src/Compiler/HeapReporter.hpp"
+#include "src/Compiler/OnnxIREmitCuda.hpp"
 #include "src/Version/Version.hpp"
 
 using namespace mlir;
@@ -897,11 +898,39 @@ void recursivePrintOpName(Operation *op, int depth = 0) {
     }
 }
 
+void recursivePrintOpTypeInfo(Operation *op, int depth = 0) {
+    // 打印当前操作的名字以及其结果类型
+    llvm::outs().indent(depth * 2) << "Operation Name: " << op->getName().getStringRef().str() << "\n";
+    llvm::outs().indent(depth * 2) << "Result Types: ";
+    interleaveComma(op->getResultTypes(), llvm::outs());
+    llvm::outs() << "\n";
+
+    // 打印操作数类型
+    llvm::outs().indent(depth * 2) << "Operand Types: ";
+    interleaveComma(op->getOperandTypes(), llvm::outs());
+    llvm::outs() << "\n";
+
+    // 遍历当前操作的所有子区域（如果有）
+    for (Region &region : op->getRegions()) {
+        // 遍历每个区域中的所有块
+        for (Block &block : region) {
+            // 对块中的每个操作递归调用此函数
+            for (Operation &childOp : block) {
+                recursivePrintOpTypeInfo(&childOp, depth + 1);
+            }
+        }
+    }
+}
+
 static int emitOutput(mlir::OwningOpRef<ModuleOp> &module,
     mlir::MLIRContext &context, std::string outputNameNoExt,
     mlir::PassManager &pm, EmissionTargetType emissionTarget) {
   
-  recursivePrintOpName(module.get(), 0);
+  //recursivePrintOpTypeInfo(module.get(), 0);
+  raw_ostream &os = llvm::outs();
+  if(failed(onnx_mlir::translateToCuda(module.get(), os, false))) {
+    llvm::errs() << "emit cuda failed!\n"; 
+  }
   if (printIR) {
     outputModule(module, llvm::outs());
     return CompilerSuccess;
