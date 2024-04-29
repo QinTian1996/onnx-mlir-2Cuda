@@ -38,6 +38,7 @@
 using namespace mlir;
 using llvm::formatv;
 
+
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
 /// on each element doesn't return a string.
@@ -81,6 +82,13 @@ struct CudaEmitter {
 
   /// Emits attribute or returns failure.
   LogicalResult emitAttribute(Location loc, Attribute attr);
+
+
+  /// Emit ssa var declaration or return falure.
+  LogicalResult emitDeclaration(Value &value);
+
+  /// Emit ssa var free or return falure.
+  LogicalResult emitFree(Value &value);
 
   /// Emits operation 'op' with/without training semicolon or returns failure.
   LogicalResult emitOperation(Operation &op, bool trailingSemicolon);
@@ -161,6 +169,11 @@ struct CudaEmitter {
   /// be declared at the beginning of a function.
   bool shouldDeclareVariablesAtTop() { return declareVariablesAtTop; };
 
+  /// Record and get malloced tensor value
+  void pushTensorRecord(Value value);
+  Value popTensorRecord(void);
+  bool isTensorRecordEmpty(void) { return tensorRecord.empty(); };
+
 private:
   using ValueMapper = llvm::ScopedHashTable<Value, std::string>;
   using BlockMapper = llvm::ScopedHashTable<Block *, std::string>;
@@ -183,6 +196,9 @@ private:
   /// names of values in a scope.
   std::stack<int64_t> valueInScopeCount;
   std::stack<int64_t> labelInScopeCount;
+
+  /// Record all ssa value has cudaMalloc, cudaFree all within func::returnOp
+  std::stack<Value> tensorRecord;
 };
 
 
@@ -201,10 +217,11 @@ StringRef CudaEmitter::getOrCreateName(Value val) {
 
 LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
   if (auto tType = type.dyn_cast<TensorType>()) {
+    os << "/*" << type << "*/ ";
     if(failed(emitType(loc, tType.getElementType()))) {
       return emitError(loc, "cannot emit tensor element type ") << type;
     }
-    return (os << " *" << " /*" << type << "*/ "), success();
+    return (os << " *"), success();
   }
   if (auto iType = dyn_cast<IntegerType>(type)) {
     switch (iType.getWidth()) {
@@ -261,6 +278,16 @@ LogicalResult CudaEmitter::emitAttribute(Location loc, Attribute attr) {
   return success();
 }
 
+void CudaEmitter::pushTensorRecord(Value value) {
+  tensorRecord.push(value);
+}
+
+Value CudaEmitter::popTensorRecord(void) {
+  Value value = tensorRecord.top();
+  tensorRecord.pop();
+  return value;
+}
+
 static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
                                         StringRef callee) {
 
@@ -281,12 +308,29 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
   Value x = leakyReluOp.getX();
   Value y = leakyReluOp.getY();
   llvm::APFloat alpha = leakyReluOp.getAlpha();
-  os << "onnxLeakyReLU(";
-  os << emitter.getOrCreateName(x);
+  auto tTypeX = x.getType().dyn_cast_or_null<TensorType>();
+  auto tTypeY = y.getType().dyn_cast_or_null<TensorType>();
+
+  if ((!tTypeX) || (!tTypeY)) {
+    return leakyReluOp.emitOpError("operand not valid tensor type!");
+  }
+
+  if (tTypeX.getNumElements() != tTypeY.getNumElements()) {
+    return leakyReluOp.emitOpError("operand size not match!");
+  }
+
+  os << "onnxLeakyReLU";
+  os << "<<<(" << tTypeX.getNumElements() << " + threads_per_block - 1)/threads_per_block, threads_per_block>>>";
+  os << "(";
+  os << emitter.getOrCreateName(x); //X
   os << ", ";
-  os << emitter.getOrCreateName(y);
+  os << emitter.getOrCreateName(y); //Y
   os << ", ";
-  os << alpha.convertToFloat();
+  os << tTypeX.getNumElements(); //size
+  os << ", ";
+  os << (tTypeX.getElementTypeBitWidth() >> 3); //stride
+  os << ", ";
+  os << alpha.convertToFloat(); //alpha
   os << ");";
   return success();
 }
@@ -317,22 +361,44 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
       if (resAttrs) {
         DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
         if (dictAttrs && dictAttrs.contains("onnx.name")) {
-          
-          os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
-                          .value()
-                          .getValue()
-                          .cast<StringAttr>().strref();
-          os << " /*output[" << i << "]*/";
-          os << " = ";
-          //if (!emitter.hasValueInScope(returnOprands[i])) {
-          //  return returnOp.emitError("return undefined value!");
-          //}
-          os << emitter.getOrCreateName(returnOprands[i]);
-          os << ";\n";
-          os << "return;";
+          //cudaMemcpy
+          if (auto tType = returnOprands[i].getType().dyn_cast<TensorType>()) {
+            os << "cudaMemcpy(";
+            os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+                            .value()
+                            .getValue()
+                            .cast<StringAttr>().strref();
+            os << ", ";
+            os << emitter.getOrCreateName(returnOprands[i]) << ", ";
+            os << tType.getNumElements();
+            os << " * sizeof(";
+            if (failed(emitter.emitType(returnOprands[i].getLoc(), tType.getElementType()))) {
+              return returnOp.emitError("emit return value type failed!");
+            } 
+            os << "), cudaMemcpyDeviceToDevice);\n"; 
+          } else {
+            os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+                            .value()
+                            .getValue()
+                            .cast<StringAttr>().strref();
+            //os << " /*output[" << i << "]*/";
+            os << " = ";
+            if (!emitter.hasValueInScope(returnOprands[i])) {
+              return returnOp.emitError("return undefined value!");
+            }
+            os << emitter.getOrCreateName(returnOprands[i]);
+            os << ";\n";
+          }
         }
       }
     }
+
+    while (!emitter.isTensorRecordEmpty()) {
+      Value value = emitter.popTensorRecord();
+      os << "cudaFree(" << emitter.getOrCreateName(value) << ");\n";
+    }
+
+    os << "return;";
     return success();
 
 }
@@ -341,12 +407,10 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   CudaEmitter::Scope scope(emitter);
   raw_indented_ostream &os = emitter.ostream();
   FunctionType funcType = funcOp.getFunctionType();
-  //auto inputs = funcType.getInputs();
   auto outputs = funcType.getResults();
-  //ArrayAttr argAttrs = funcOp.getArgAttrsAttr();
   ArrayAttr resAttrs = funcOp.getResAttrsAttr();
 
-  os << "__global__ void " << funcOp.getName().str() << "(";
+  os << "__host__ void " << funcOp.getName().str() << "(";
   for (auto arg : funcOp.getArguments()) {
     if(failed(emitter.emitType(funcOp.getLoc(), arg.getType()))) {
       return funcOp.emitOpError("func args emit failed!");
@@ -367,13 +431,18 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
                         .value()
                         .getValue()
                         .cast<StringAttr>().strref();
-        os << " /*output[" << i << "]*/";
+        //os << " /*output[" << i << "]*/";
       }
     }
   }
   os << ") {";
   os.indent();
   os << "\n";
+
+  //add some fiexed code
+  os << "int threads_per_block = 512; //fixed block setting for now\n";
+
+
   // 遍历当前操作的所有子区域（如果有）
   for (Region &region : funcOp->getRegions()) {
     // 遍历每个区域中的所有块
@@ -401,7 +470,47 @@ LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
   return success();
 }
 
+LogicalResult CudaEmitter::emitDeclaration(Value &value) {
+  if (failed(this->emitType(value.getLoc(), value.getType()))) {
+    return failure();
+  }
+
+  os << getOrCreateName(value) << ";\n";
+
+  if (auto tType = value.getType().dyn_cast<TensorType>()) {
+    os << "cudaMalloc((void**)&" << getOrCreateName(value) << ", "<< tType.getNumElements() << " * sizeof(";
+    if (failed(emitType(value.getLoc(), tType.getElementType()))) {
+      return failure();
+    }
+    os << "))";
+    pushTensorRecord(value);
+  }
+
+  os << ";\n";
+
+  return success();
+}
+
+LogicalResult CudaEmitter::emitFree(Value &value) {
+  //TODO:
+  if (auto tType = value.getType().dyn_cast<TensorType>()) {
+    os << "cudaFree(" << getOrCreateName(value) << ");\n";
+  }
+
+  return success();
+}
+
+
 LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) {
+  //add var declaration if op has result
+  if (op.getNumResults()) {
+    for (auto res : op.getResults()) {
+      if (failed(emitDeclaration(res))) {
+        return op.emitOpError("unable to declare ssa var.");
+      }
+    }
+  }
+
   LogicalResult status =
       llvm::TypeSwitch<Operation *, LogicalResult>(&op)
           // Builtin ops.
