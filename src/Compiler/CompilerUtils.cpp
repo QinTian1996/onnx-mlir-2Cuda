@@ -926,11 +926,11 @@ static int emitOutput(mlir::OwningOpRef<ModuleOp> &module,
     mlir::MLIRContext &context, std::string outputNameNoExt,
     mlir::PassManager &pm, EmissionTargetType emissionTarget) {
   
-  //recursivePrintOpTypeInfo(module.get(), 0);
   raw_ostream &os = llvm::outs();
   if(failed(onnx_mlir::translateToCuda(module.get(), os, false))) {
     llvm::errs() << "emit cuda failed!\n"; 
   }
+  //recursivePrintOpTypeInfo(module.get(), 0);
   if (printIR) {
     outputModule(module, llvm::outs());
     return CompilerSuccess;

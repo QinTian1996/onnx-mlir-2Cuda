@@ -29,6 +29,7 @@
 #include <utility>
 #include <stack>
 #include "../Dialect/Mlir/DialectBuilder.hpp"
+#include <llvm/IR/DerivedTypes.h>
 
 
 
@@ -144,7 +145,10 @@ struct CudaEmitter {
     CudaEmitter &emitter;
   };
 
-  /// Returns wether the Value is assigned to a C++ variable in the scope.
+  /// Return the existing or a new name for a Value.
+  StringRef getOrCreateName(Value val);
+
+  /// Returns wether the Value is assigned to a variable in the scope.
   bool hasValueInScope(Value val);
 
   // Returns whether a label is assigned to the block.
@@ -188,6 +192,52 @@ CudaEmitter::CudaEmitter(raw_ostream &os, bool declareVariablesAtTop)
   labelInScopeCount.push(0);
 }
 
+/// Return the existing or a new name for a Value.
+StringRef CudaEmitter::getOrCreateName(Value val) {
+  if (!valueMapper.count(val))
+    valueMapper.insert(val, formatv("v{0}", ++valueInScopeCount.top()));
+  return *valueMapper.begin(val);
+}
+
+LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
+  if (auto tType = type.dyn_cast<TensorType>()) {
+    if(failed(emitType(loc, tType.getElementType()))) {
+      return emitError(loc, "cannot emit tensor element type ") << type;
+    }
+    return (os << " *" << " /*" << type << "*/ "), success();
+  }
+  if (auto iType = dyn_cast<IntegerType>(type)) {
+    switch (iType.getWidth()) {
+    case 1:
+      return (os << "bool"), success();
+    case 8:
+    case 16:
+    case 32:
+    case 64:
+      if (shouldMapToUnsigned(iType.getSignedness()))
+        return (os << "uint" << iType.getWidth() << "_t"), success();
+      else
+        return (os << "int" << iType.getWidth() << "_t"), success();
+    default:
+      return emitError(loc, "cannot emit integer type ") << type;
+    }
+  }
+  if (auto fType = dyn_cast<FloatType>(type)) {
+    switch (fType.getWidth()) {
+    case 32:
+      return (os << "float"), success();
+    case 64:
+      return (os << "double"), success();
+    default:
+      return emitError(loc, "cannot emit float type ") << type;
+    }
+  }
+  if (auto iType = dyn_cast<IndexType>(type))
+    return (os << "size_t"), success();
+
+  return emitError(loc, "cannot emit unkown type ") << type;
+}
+
 bool CudaEmitter::shouldMapToUnsigned(IntegerType::SignednessSemantics val) {
   switch (val) {
   case IntegerType::Signless:
@@ -214,20 +264,10 @@ LogicalResult CudaEmitter::emitAttribute(Location loc, Attribute attr) {
 static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
                                         StringRef callee) {
 
-  raw_ostream &os = emitter.ostream();
+  raw_indented_ostream &os = emitter.ostream();
   os << callee << "(";
   os << "TODO: args";
   os << ")";
-  return success();
-}
-
-LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
-  CudaEmitter::Scope scope(emitter);
-
-  for (Operation &op : moduleOp) {
-    if (failed(emitter.emitOperation(op, /*trailingSemicolon=*/false)))
-      return failure();
-  }
   return success();
 }
 
@@ -237,7 +277,17 @@ LogicalResult printOperation(CudaEmitter &emitter,::mlir::ONNXAbsOp absOp) {
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) {
-  //TODO:
+  raw_indented_ostream &os = emitter.ostream();
+  Value x = leakyReluOp.getX();
+  Value y = leakyReluOp.getY();
+  llvm::APFloat alpha = leakyReluOp.getAlpha();
+  os << "onnxLeakyReLU(";
+  os << emitter.getOrCreateName(x);
+  os << ", ";
+  os << emitter.getOrCreateName(y);
+  os << ", ";
+  os << alpha.convertToFloat();
+  os << ");";
   return success();
 }
 
@@ -248,16 +298,107 @@ LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   return printCallOperation(emitter, operation, callee);
 }
 
-LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
-    //TODO:
+//returnOp in onnx is actually assigning returned value to output value corresponly.
+//eg. return %0 -> %output_0 := %0
+LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
+    //processReturnOp(returnOp);
+    raw_indented_ostream &os = emitter.ostream();
+    func::FuncOp funcOp = dyn_cast_or_null<func::FuncOp>(returnOp->getBlock()->getParent()->getParentOp());
+    FunctionType funcType = funcOp.getFunctionType();
+    ArrayAttr resAttrs = funcOp.getResAttrsAttr();
+    auto returnOprands = returnOp.getOperands();
+
+    if (returnOp.getNumOperands() != funcType.getNumResults()) {
+      return returnOp.emitError("return value number does not match the function output number!");
+    }
+
+    for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
+      //TODO: impl typecheck.
+      if (resAttrs) {
+        DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
+        if (dictAttrs && dictAttrs.contains("onnx.name")) {
+          
+          os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+                          .value()
+                          .getValue()
+                          .cast<StringAttr>().strref();
+          os << " /*output[" << i << "]*/";
+          os << " = ";
+          //if (!emitter.hasValueInScope(returnOprands[i])) {
+          //  return returnOp.emitError("return undefined value!");
+          //}
+          os << emitter.getOrCreateName(returnOprands[i]);
+          os << ";\n";
+          os << "return;";
+        }
+      }
+    }
     return success();
 
 }
 
-LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
-    //TODO:
-    return success();
+LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
+  CudaEmitter::Scope scope(emitter);
+  raw_indented_ostream &os = emitter.ostream();
+  FunctionType funcType = funcOp.getFunctionType();
+  //auto inputs = funcType.getInputs();
+  auto outputs = funcType.getResults();
+  //ArrayAttr argAttrs = funcOp.getArgAttrsAttr();
+  ArrayAttr resAttrs = funcOp.getResAttrsAttr();
 
+  os << "__global__ void " << funcOp.getName().str() << "(";
+  for (auto arg : funcOp.getArguments()) {
+    if(failed(emitter.emitType(funcOp.getLoc(), arg.getType()))) {
+      return funcOp.emitOpError("func args emit failed!");
+    }
+    os << emitter.getOrCreateName(arg) << ", ";
+  }
+  for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
+    if (i) {
+      os << ", ";
+    }
+    if (failed(emitter.emitType(funcOp.getLoc(), outputs[i]))) {
+      return funcOp.emitOpError("func args emit failed!");
+    }
+    if (resAttrs) {
+      DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
+      if (dictAttrs && dictAttrs.contains("onnx.name")) {
+        os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+                        .value()
+                        .getValue()
+                        .cast<StringAttr>().strref();
+        os << " /*output[" << i << "]*/";
+      }
+    }
+  }
+  os << ") {";
+  os.indent();
+  os << "\n";
+  // 遍历当前操作的所有子区域（如果有）
+  for (Region &region : funcOp->getRegions()) {
+    // 遍历每个区域中的所有块
+    for (Block &block : region) {
+      // 对块中的每个操作递归调用此函数
+      for (Operation &childOp : block) {
+        if (failed(emitter.emitOperation(childOp, false))) {
+          return funcOp.emitOpError("func body emit failed!");
+        }
+      }
+    }
+  }
+  os.unindent();
+  os << "}\n";
+
+  return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
+
+  for (Operation &op : moduleOp) {
+    if (failed(emitter.emitOperation(op, /*trailingSemicolon=*/false)))
+      return failure();
+  }
+  return success();
 }
 
 LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) {
@@ -275,6 +416,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           .Case<func::CallOp, func::FuncOp, func::ReturnOp>(
               [&](auto op) { return printOperation(*this, op); })
           //.Case<mlir::LiteralOp>([&](auto op) { return success(); })
+          // ignore entry point, we will call func somewhere else
+          .Case<mlir::ONNXEntryPointOp>([&](auto op) { return success(); })
           .Default([&](Operation *) {
             return op.emitOpError("unable to find printer for op");
           });
