@@ -59,6 +59,8 @@ static std::string deriveOutputFileName(
         emissionTarget = EmissionTargetType::EmitJNI;
       else if (flagVect[i].find("Obj") <= 6)
         emissionTarget = EmissionTargetType::EmitObj;
+      else if (flagVect[i].find("Cuda") <= 6)
+        emissionTarget = EmissionTargetType::EmitCuda;
       else // There are many other targets, all of the MLIR type.
         emissionTarget = EmissionTargetType::EmitMLIR;
       break;

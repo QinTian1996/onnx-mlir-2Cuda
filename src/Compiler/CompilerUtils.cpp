@@ -315,6 +315,8 @@ std::string getTargetFilename(
 
   case EmitJNI:
     return filenameNoExt + ".jar";
+  case EmitCuda:
+    return filenameNoExt + ".onnx.cu";
   case EmitLLVMIR:
   case EmitONNXBasic:
   case EmitONNXIR:
@@ -739,6 +741,27 @@ static int emitOutputFiles(std::string outputNameNoExt,
       printf(
           "JNI archive '%s.jar' has been compiled.\n", outputNameNoExt.c_str());
   } break;
+  case EmitCuda: {
+    std::string ouputNameWithExt = outputNameNoExt + ".onnx.cu";
+    if (printIR) {
+      if (failed(translateToCuda(module.get(), llvm::outs(), false))) {
+        return CompilerFailure;
+      }
+    }
+    std::string errorMessage;
+    auto output = openOutputFile(outputNameNoExt + ".onnx.cu", &errorMessage);
+    if (!output) {
+      llvm::errs() << errorMessage << "\n";
+      return InvalidOutputFileAccess;
+    }
+    if (failed(translateToCuda(module.get(), output->os(), false))) {
+      return CompilerFailure;
+    }
+    output->keep();
+    if (VerboseOutput) {
+      printf("Cuda code written to: \n\t%s.onnx.cu\n\n", outputNameNoExt.c_str());
+    }
+  } break;
   default: {
     // Emit the version with all constants included.
     std::string ouputNameWithExt =
@@ -926,10 +949,9 @@ static int emitOutput(mlir::OwningOpRef<ModuleOp> &module,
     mlir::MLIRContext &context, std::string outputNameNoExt,
     mlir::PassManager &pm, EmissionTargetType emissionTarget) {
   
-  raw_ostream &os = llvm::outs();
-  if(failed(onnx_mlir::translateToCuda(module.get(), os, false))) {
-    llvm::errs() << "emit cuda failed!\n"; 
-  }
+  //if(failed(onnx_mlir::translateToCuda(module.get(), os, false))) {
+  //  llvm::errs() << "emit cuda failed!\n"; 
+  //}
   //recursivePrintOpTypeInfo(module.get(), 0);
   if (printIR) {
     outputModule(module, llvm::outs());

@@ -222,6 +222,7 @@ static llvm::cl::opt<EmissionTargetType, true> emissionTargetOpt(
         clEnumVal(EmitObj, "Compile the input into a object file."),
         clEnumVal(
             EmitLib, "Compile the input into a shared library (default)."),
+        clEnumVal(EmitCuda,"Compile the input into a cuda file."),
         clEnumVal(EmitJNI, "Compile the input into a jar file.")),
     llvm::cl::init(EmitLib), llvm::cl::cat(OnnxMlirOptions));
 

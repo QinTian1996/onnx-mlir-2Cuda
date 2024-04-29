@@ -66,6 +66,7 @@ PYBIND11_MODULE(PyCompile, m) {
       .value("emit_llvmir", onnx_mlir::EmissionTargetType::EmitLLVMIR)
       .value("emit_obj", onnx_mlir::EmissionTargetType::EmitObj)
       .value("emit_lib", onnx_mlir::EmissionTargetType::EmitLib)
+      .value("emit_cuda", onnx_mlir::EmissionTargetType::EmitCuda)
       .value("emit_jni", onnx_mlir::EmissionTargetType::EmitJNI)
       .export_values();
 }
