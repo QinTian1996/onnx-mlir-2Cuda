@@ -176,11 +176,6 @@ struct CudaEmitter {
   /// be declared at the beginning of a function.
   bool shouldDeclareVariablesAtTop() { return declareVariablesAtTop; };
 
-  /// Record and get malloced tensor value
-  void pushTensorRecord(Value value);
-  Value popTensorRecord(void);
-  bool isTensorRecordEmpty(void) { return tensorRecord.empty(); };
-
   /// Emit include
   void emitInclude(StringRef name, bool isLocal);
 
@@ -216,7 +211,18 @@ struct CudaEmitter {
   };
   Operation *getValueFirstUse(Value value);
   Operation *getValueLastUse (Value value);
-  
+
+  //Pre/Post proccess for every ONNX op. 
+  LogicalResult emitONNXPreOp (Operation &op);
+  LogicalResult emitONNXPostOp(Operation &op);
+
+  std::string getStreamName(Value value);
+  std::string getEventName(Value value);
+
+  //Push/Pop cudaEvent record.
+  void pushCudaEvent(Value value) { eventRecord.push(value); };
+  Value popCudaEvent(void) { Value v = eventRecord.top(); eventRecord.pop(); return v; };
+  bool hasCudaEvent(void) { return !eventRecord.empty(); };
 
 private:
   using ValueMapper = llvm::ScopedHashTable<Value, std::string>;
@@ -242,8 +248,8 @@ private:
   std::stack<int64_t> valueInScopeCount;
   std::stack<int64_t> labelInScopeCount;
 
-  /// Record all ssa value has cudaMalloc, cudaFree all within func::returnOp
-  std::stack<Value> tensorRecord;
+  /// Record all events
+  std::stack<Value> eventRecord;
 
   /// Collect all onnx op using ppl.cv to print include lines
   /// eg. mlir::ONNXAbsOp -> #include <ppl/cv/cuda/Abs.h>
@@ -328,16 +334,6 @@ bool CudaEmitter::hasBlockLabel(Block &block) {
 LogicalResult CudaEmitter::emitAttribute(Location loc, Attribute attr) {
   //qt[24/4/28]: ignore attr for now.
   return success();
-}
-
-void CudaEmitter::pushTensorRecord(Value value) {
-  tensorRecord.push(value);
-}
-
-Value CudaEmitter::popTensorRecord(void) {
-  Value value = tensorRecord.top();
-  tensorRecord.pop();
-  return value;
 }
 
 LogicalResult CudaEmitter::trackValueLifetime(func::FuncOp funcOp) {
@@ -464,7 +460,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXAddOp addOp) {
   os << emitter.getOrCreateName(b) << ", ";
   os << channel * width << ", "; //stride of c
   os << emitter.getOrCreateName(c);
-  os << ");";
+  os << ");\n";
 
   return success();
 }
@@ -490,15 +486,20 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
       return returnOp.emitError("return value number does not match the function output number!");
     }
 
+    while (emitter.hasCudaEvent()) {
+      Value value = emitter.popCudaEvent();
+      os << "cudaEventSynchronize(" << emitter.getEventName(value) << ");\n";
+      os << "cudaEventDestroy(" << emitter.getEventName(value) << ");\n";
+    }
+
     for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
-      //TODO: impl typecheck.
       if (resAttrs) {
         DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
         if (dictAttrs && dictAttrs.contains("onnx.name")) {
           //cudaMemcpy
           if (auto tType = returnOprands[i].getType().dyn_cast<TensorType>()) {
             os << "cudaMemcpy(";
-            os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+            os << "func_output_" << dictAttrs.getNamed("onnx.name")
                             .value()
                             .getValue()
                             .cast<StringAttr>().strref();
@@ -509,9 +510,13 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
             if (failed(emitter.emitType(returnOprands[i].getLoc(), tType.getElementType()))) {
               return returnOp.emitError("emit return value type failed!");
             } 
-            os << "), cudaMemcpyDeviceToDevice);\n"; 
+            os << "), cudaMemcpyDeviceToDevice);\n";
+            Value value = returnOp.getOperand(0);
+            if(failed(emitter.emitFree(value))) {
+              return failure();
+            }
           } else {
-            os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+            os << "func_output_" << dictAttrs.getNamed("onnx.name")
                             .value()
                             .getValue()
                             .cast<StringAttr>().strref();
@@ -527,9 +532,9 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
       }
     }
 
-    while (!emitter.isTensorRecordEmpty()) {
-      Value value = emitter.popTensorRecord();
-      os << "cudaFree(" << emitter.getOrCreateName(value) << ");\n";
+    //Only destroy event of SSA which are first res of its definingOp to prevent repeat destroy for multi-output op SSA.
+    while (emitter.hasCudaEvent()) {
+      os << "cudaEventDestroy(" << emitter.getEventName(emitter.popCudaEvent()) <<");\n";
     }
 
     os << "return;";
@@ -590,7 +595,7 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
     if (resAttrs) {
       DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
       if (dictAttrs && dictAttrs.contains("onnx.name")) {
-        os << "onnx_name_" << dictAttrs.getNamed("onnx.name")
+        os << "func_output_" << dictAttrs.getNamed("onnx.name")
                         .value()
                         .getValue()
                         .cast<StringAttr>().strref();
@@ -660,6 +665,68 @@ LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
   return success();
 }
 
+std::string CudaEmitter::getStreamName(Value value) {
+  return  getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Stream";
+}
+
+std::string CudaEmitter::getEventName(Value value) {
+  assert(value.getDefiningOp());
+  return getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Event";
+}
+
+LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
+  //if op has result(all onnx op  has at least one output, so just a guard here)
+  if (op.getNumResults()) {
+    //SSA  var declaration
+    for (auto res : op.getResults()) {
+      if (failed(emitDeclaration(res))) {
+        return op.emitOpError("unable to declare ssa var.");
+      }
+    }
+
+    //Name stream and event after res[0]. Declare and init stream and event for every ONNX op.
+    Value res0 = op.getResult(0);
+    os << "cudaStream_t " << getStreamName(res0) << ";\n";
+    os << "cudaStreamCreate(&" << getStreamName(res0) << ");\n";
+    os << "cudaEvent_t " << getEventName(res0) << ";\n";
+    os << "cudaEventCreate(&" << getEventName(res0) << ");\n";
+    pushCudaEvent(res0);
+
+    //Wait for events for every operand
+    if (op.getNumOperands()) {
+      for (auto operand : op.getOperands()) {
+        if (NULL == operand.getDefiningOp()) { continue; }
+        os << "cudaStreamWaitEvent(" << getStreamName(res0) << ", " << getEventName(operand) << ", 0);\n"; 
+      }
+    }
+  }
+
+  return success();
+}
+
+LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
+  // 1. emit event record
+  os << "cudaEventRecord(" << getEventName(op.getResult(0)) << ", " << getStreamName(op.getResult(0)) << ");\n";
+
+  if (op.getNumOperands()) {
+    for (auto operand : op.getOperands()) {
+      // 2. destroy first use operand`s stream (func args do not have definingOp and do not need streamdestroy)
+      if (operand.getDefiningOp() && getValueFirstUse(operand) == (&op)) {
+        os << "cudaStreamDestroy(" << getStreamName(operand) << ");\n";
+      }
+
+      // 3. free last use for every operands
+      if (getValueLastUse(operand) == (&op)) {
+        if (failed(emitFree(operand))) {
+          return failure();
+        }
+      }
+    }
+  }
+
+  return success();
+}
+
 LogicalResult CudaEmitter::emitDeclaration(Value &value) {
   if (failed(this->emitType(value.getLoc(), value.getType()))) {
     return failure();
@@ -673,16 +740,13 @@ LogicalResult CudaEmitter::emitDeclaration(Value &value) {
       return failure();
     }
     os << "))";
-    pushTensorRecord(value);
   }
-
   os << ";\n";
 
   return success();
 }
 
 LogicalResult CudaEmitter::emitFree(Value &value) {
-  //TODO:
   if (auto tType = value.getType().dyn_cast<TensorType>()) {
     os << "cudaFree(" << getOrCreateName(value) << ");\n";
   }
@@ -692,15 +756,6 @@ LogicalResult CudaEmitter::emitFree(Value &value) {
 
 
 LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) {
-  //add var declaration if op has result
-  if (op.getNumResults()) {
-    for (auto res : op.getResults()) {
-      if (failed(emitDeclaration(res))) {
-        return op.emitOpError("unable to declare ssa var.");
-      }
-    }
-  }
-
   LogicalResult status =
       llvm::TypeSwitch<Operation *, LogicalResult>(&op)
           // Builtin ops.
@@ -709,10 +764,14 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           //.Case<cf::BranchOp, cf::CondBranchOp>(
           //    [&](auto op) { return printOperation(*this, op); })
           // ONNX ops.
-          .Case<mlir::ONNXAbsOp, mlir::ONNXLeakyReluOp>(
-              [&](auto op) { return printOperation(*this, op); })
           .Case<mlir::ONNXAbsOp, mlir::ONNXAddOp>(
-              [&](auto op) { return printOperation(*this, op); })
+              [&](auto op) {
+                Operation *opop = op.getOperation();
+                if (failed(emitONNXPreOp(*opop)))         { return failure(); }
+                if (failed(printOperation(*this, op))) { return failure(); }
+                if (failed(emitONNXPostOp(*opop)))        { return failure(); }
+                return success();
+          })
           // Func ops.
           .Case<func::CallOp, func::FuncOp, func::ReturnOp>(
               [&](auto op) { return printOperation(*this, op); })
