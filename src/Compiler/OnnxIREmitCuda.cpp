@@ -28,6 +28,7 @@
 
 #include <utility>
 #include <stack>
+#include <set>
 #include "../Dialect/Mlir/DialectBuilder.hpp"
 #include <llvm/IR/DerivedTypes.h>
 
@@ -138,7 +139,11 @@ struct CudaEmitter {
   struct Scope {
     Scope(CudaEmitter &emitter)
         : valueMapperScope(emitter.valueMapper),
-          blockMapperScope(emitter.blockMapper), emitter(emitter) {
+          blockMapperScope(emitter.blockMapper),
+          lifetimeTrackerFirstScope(emitter.valueFisrtUseTracker),
+          lifetimeTrackerLastScope(emitter.valueLastUseTracker),
+          emitter(emitter)
+        {
       emitter.valueInScopeCount.push(emitter.valueInScopeCount.top());
       emitter.labelInScopeCount.push(emitter.labelInScopeCount.top());
     }
@@ -150,6 +155,8 @@ struct CudaEmitter {
   private:
     llvm::ScopedHashTableScope<Value, std::string> valueMapperScope;
     llvm::ScopedHashTableScope<Block *, std::string> blockMapperScope;
+    llvm::ScopedHashTableScope<Value, Operation *> lifetimeTrackerFirstScope;
+    llvm::ScopedHashTableScope<Value, Operation *> lifetimeTrackerLastScope;
     CudaEmitter &emitter;
   };
 
@@ -174,9 +181,47 @@ struct CudaEmitter {
   Value popTensorRecord(void);
   bool isTensorRecordEmpty(void) { return tensorRecord.empty(); };
 
+  /// Emit include
+  void emitInclude(StringRef name, bool isLocal);
+
+  /// Collect and print ppl.cv related include
+  void collectPplInc(CudaEmitter &emitter, ModuleOp moduleOp);
+  void printPplInc(CudaEmitter &emitter);
+
+  /// Insert and check for ppl op type
+  void insertPplOp(StringRef name) {
+    onnx_op_types.insert(name);
+  };
+  bool hasPplOp(StringRef name) {
+    return (onnx_op_types.find(name) != onnx_op_types.end());
+  };
+
+  /// Track lifetime of ssa
+  LogicalResult trackValueLifetime(func::FuncOp funcOp);
+  void updateValueUse(Value value, Operation *op) {
+    //#### 最后调用
+    //1. `map(key=Value, val=Operation)`
+    //2. `funcOp.walk`
+    //3. `map[Value]=Operation`
+    //4. `map`里是SSA的最后调用
+    //#### 最初调用
+    //1. `map(key=Value, val=Operation)`
+    //2. `funcOp.walk`
+    //3. `if (!map[Value].exist) { map[Value] = Operation; }`
+    //4. `map`里是SSA的最初调用
+    if(!valueFisrtUseTracker.count(value)) {
+      valueFisrtUseTracker.insert(value, op);
+    }
+    valueLastUseTracker.insert(value, op);
+  };
+  Operation *getValueFirstUse(Value value);
+  Operation *getValueLastUse (Value value);
+  
+
 private:
   using ValueMapper = llvm::ScopedHashTable<Value, std::string>;
   using BlockMapper = llvm::ScopedHashTable<Block *, std::string>;
+  using LifeTimeTracker = llvm::ScopedHashTable<Value, Operation *>;
 
   /// Output stream to emit to.
   raw_indented_ostream os;
@@ -199,8 +244,15 @@ private:
 
   /// Record all ssa value has cudaMalloc, cudaFree all within func::returnOp
   std::stack<Value> tensorRecord;
-};
 
+  /// Collect all onnx op using ppl.cv to print include lines
+  /// eg. mlir::ONNXAbsOp -> #include <ppl/cv/cuda/Abs.h>
+  std::set<StringRef> onnx_op_types;
+
+  /// Track first and last use of Value
+  LifeTimeTracker valueFisrtUseTracker;
+  LifeTimeTracker valueLastUseTracker;
+};
 
 CudaEmitter::CudaEmitter(raw_ostream &os, bool declareVariablesAtTop)
     : os(os), declareVariablesAtTop(declareVariablesAtTop) {
@@ -288,6 +340,29 @@ Value CudaEmitter::popTensorRecord(void) {
   return value;
 }
 
+LogicalResult CudaEmitter::trackValueLifetime(func::FuncOp funcOp) {
+  funcOp.walk([&](Operation *op) {
+    for (auto i : op->getOperands()) {
+      updateValueUse(i, op);
+    }
+  });
+  return success();
+}
+
+Operation *CudaEmitter::getValueFirstUse(Value value) {
+  if (!valueFisrtUseTracker.count(value)) {
+    return NULL;
+  }
+  return valueFisrtUseTracker.lookup(value);
+}
+
+Operation *CudaEmitter::getValueLastUse (Value value) {
+  if (!valueLastUseTracker.count(value)) {
+    return NULL;
+  }
+  return valueLastUseTracker.lookup(value);
+}
+
 static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
                                         StringRef callee) {
 
@@ -296,6 +371,13 @@ static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
   os << "TODO: args";
   os << ")";
   return success();
+}
+
+/// print fixed code: include and leakyrelu implement
+void printFixedCode(CudaEmitter &emitter) {
+  raw_indented_ostream &os = emitter.ostream();
+  os << "#include <cuda_runtime.h>\n";
+  return;
 }
 
 LogicalResult printOperation(CudaEmitter &emitter,::mlir::ONNXAbsOp absOp) {
@@ -318,7 +400,6 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
   if (tTypeX.getNumElements() != tTypeY.getNumElements()) {
     return leakyReluOp.emitOpError("operand size not match!");
   }
-
   os << "onnxLeakyReLU";
   os << "<<<(" << tTypeX.getNumElements() << " + threads_per_block - 1)/threads_per_block, threads_per_block>>>";
   os << "(";
@@ -335,6 +416,59 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
   return success();
 }
 
+LogicalResult printOperation(CudaEmitter &emitter, ONNXAddOp addOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value a = addOp.getA();
+  Value b = addOp.getB();
+  Value c = addOp.getC();
+  auto tTypeA = a.getType().dyn_cast_or_null<TensorType>();
+  auto tTypeB = b.getType().dyn_cast_or_null<TensorType>();
+  auto tTypeC = c.getType().dyn_cast_or_null<TensorType>();
+  auto shapeA = tTypeA.getShape();
+  auto shapeB = tTypeB.getShape();
+  auto shapeC = tTypeC.getShape();
+
+  //Not support broadcast for diff shape for now.
+  if (!shapeA.equals(shapeB) || !shapeA.equals(shapeC)) {
+    return addOp.emitOpError("operand size not match!");
+  }
+  //Not support dynamic shape for now.
+  if (tTypeA.getNumDynamicDims()) {
+    return addOp.emitOpError("Dynamic shape not supported!");
+  }
+
+  
+  auto width = shapeA[0];
+  auto height = tTypeA.getNumElements() / width;;
+  auto channel = 1;
+  auto stream = 0; //use default stream for now
+  /*
+  *   c = a + b
+  *   Add<float, 3>(stream, height, width,
+  *                 channel * width, a,
+  *                 channel * width, b,
+  *                 channel * width, c);
+  *
+  */
+  os << "ppl::cv::cuda::Add<";
+  if (failed(emitter.emitType(a.getLoc(), tTypeA.getElementType()))) {
+    return failure();
+  }
+  os << ", " << channel << ">(";
+  os << stream << ", ";
+  os << height << ", ";
+  os << width << ", ";
+  os << channel * width << ", "; //stride of a
+  os << emitter.getOrCreateName(a) << ", ";
+  os << channel * width << ", "; //stride of b
+  os << emitter.getOrCreateName(b) << ", ";
+  os << channel * width << ", "; //stride of c
+  os << emitter.getOrCreateName(c);
+  os << ");";
+
+  return success();
+}
+
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   Operation *operation = callOp.getOperation();
   StringRef callee = callOp.getCallee();
@@ -342,7 +476,7 @@ LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   return printCallOperation(emitter, operation, callee);
 }
 
-//returnOp in onnx is actually assigning returned value to output value corresponly.
+//returnOp in onnx is actually assigning returned value to output value correspondly.
 //eg. return %0 -> %output_0 := %0
 LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
     //processReturnOp(returnOp);
@@ -410,6 +544,35 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   auto outputs = funcType.getResults();
   ArrayAttr resAttrs = funcOp.getResAttrsAttr();
 
+  if (failed(emitter.trackValueLifetime(funcOp))) {
+    return failure();
+  }
+#if 0
+  funcOp.walk([&](Operation *op){
+      raw_indented_ostream &os = emitter.ostream();
+    if (op->getNumResults()) {
+      for (auto i : op->getResults()) {
+        if (emitter.getValueFirstUse(i)) {
+          os << emitter.getOrCreateName(i) << " fisrt use at ";
+          os << emitter.getOrCreateName(i) << " = " << op->getName() << "(";
+          for (auto j : emitter.getValueFirstUse(i)->getOperands()) {
+            os << emitter.getOrCreateName(j) << ", ";
+          }
+          os << ");\n";
+        }
+        if (emitter.getValueLastUse(i)) {
+          os << emitter.getOrCreateName(i) << " last use at ";
+          os << emitter.getOrCreateName(i) << " = " << op->getName() << "(";
+          for (auto j : emitter.getValueLastUse(i)->getOperands()) {
+            os << emitter.getOrCreateName(j) << ", ";
+          }
+          os << ");\n";
+        }
+        os << "\n";
+      }
+    }
+  });
+#endif
   os << "__host__ void " << funcOp.getName().str() << "(";
   for (auto arg : funcOp.getArguments()) {
     if(failed(emitter.emitType(funcOp.getLoc(), arg.getType()))) {
@@ -461,8 +624,35 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   return success();
 }
 
-LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
+void CudaEmitter::collectPplInc(CudaEmitter &emitter, ModuleOp moduleOp) {
+  moduleOp->walk([&](Operation *op){
+    if (op->getDialect()->getNamespace() == "onnx") {
+      insertPplOp(op->getName().getStringRef());
+    }
+  });
+}
 
+void CudaEmitter::emitInclude(StringRef name, bool isLocal) {
+  os << "#include ";
+  os << (isLocal ? "\"" : "<");
+  os << name;
+  os << (isLocal ? "\"" : ">") << "\n";
+} 
+
+
+void CudaEmitter::printPplInc(CudaEmitter &emitter) {
+  StringRef prefix = "ppl/cv/cuda/";
+  if (hasPplOp("onnx.Add")) { emitter.emitInclude(prefix.str().append("arithmetic.h"), false); }
+  if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), false); }
+  //TODO: add other ops
+
+  os << "\n";
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
+  printFixedCode(emitter);
+  emitter.collectPplInc(emitter, moduleOp);
+  emitter.printPplInc(emitter);
   for (Operation &op : moduleOp) {
     if (failed(emitter.emitOperation(op, /*trailingSemicolon=*/false)))
       return failure();
@@ -520,6 +710,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           //    [&](auto op) { return printOperation(*this, op); })
           // ONNX ops.
           .Case<mlir::ONNXAbsOp, mlir::ONNXLeakyReluOp>(
+              [&](auto op) { return printOperation(*this, op); })
+          .Case<mlir::ONNXAbsOp, mlir::ONNXAddOp>(
               [&](auto op) { return printOperation(*this, op); })
           // Func ops.
           .Case<func::CallOp, func::FuncOp, func::ReturnOp>(
