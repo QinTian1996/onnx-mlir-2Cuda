@@ -6,9 +6,9 @@ import onnx.printer
 graph_proto = onnx.helper.make_graph(
     [
         onnx.helper.make_node("Add", ["A0", "A1"], ["R0"]),
-        onnx.helper.make_node("Add", ["A1", "R0"], ["R1"]),
-        onnx.helper.make_node("Add", ["R0", "R1"], ["R2"]),
-        onnx.helper.make_node("Add", ["R1", "R2"], ["R3"]),
+        onnx.helper.make_node("Sub", ["A1", "R0"], ["R1"]),
+        onnx.helper.make_node("Mul", ["R0", "R1"], ["R2"]),
+        onnx.helper.make_node("Div", ["R1", "R2"], ["R3"]),
         onnx.helper.make_node("Add", ["A0", "A1"], ["R4"]),
         onnx.helper.make_node("Add", ["R3", "R4"], ["R5"]),
     ],

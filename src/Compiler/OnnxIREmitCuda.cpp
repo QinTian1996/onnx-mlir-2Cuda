@@ -412,11 +412,12 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
   return success();
 }
 
-LogicalResult printOperation(CudaEmitter &emitter, ONNXAddOp addOp) {
+template <typename T>
+LogicalResult printONNXArithmetic(CudaEmitter &emitter, T arithmeticOp) {
   raw_indented_ostream &os = emitter.ostream();
-  Value a = addOp.getA();
-  Value b = addOp.getB();
-  Value c = addOp.getC();
+  Value a = arithmeticOp.getA();
+  Value b = arithmeticOp.getB();
+  Value c = arithmeticOp.getC();
   auto tTypeA = a.getType().dyn_cast_or_null<TensorType>();
   auto tTypeB = b.getType().dyn_cast_or_null<TensorType>();
   auto tTypeC = c.getType().dyn_cast_or_null<TensorType>();
@@ -426,43 +427,67 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXAddOp addOp) {
 
   //Not support broadcast for diff shape for now.
   if (!shapeA.equals(shapeB) || !shapeA.equals(shapeC)) {
-    return addOp.emitOpError("operand size not match!");
+    return arithmeticOp.emitOpError("operand size not match!");
   }
   //Not support dynamic shape for now.
   if (tTypeA.getNumDynamicDims()) {
-    return addOp.emitOpError("Dynamic shape not supported!");
+    return arithmeticOp.emitOpError("Dynamic shape not supported!");
   }
 
-  
   auto width = shapeA[0];
   auto height = tTypeA.getNumElements() / width;;
   auto channel = 1;
-  auto stream = 0; //use default stream for now
+  auto stream = emitter.getStreamName(c);
   /*
   *   c = a + b
-  *   Add<float, 3>(stream, height, width,
-  *                 channel * width, a,
-  *                 channel * width, b,
-  *                 channel * width, c);
+  *   ppl::cv::cuda::Add<float, 3>( stream, height, width,
+  *                                 channel * width, a,
+  *                                 channel * width, b,
+  *                                 channel * width, c);
   *
   */
-  os << "ppl::cv::cuda::Add<";
+  os << "ppl::cv::cuda::";
+  if      (dyn_cast_or_null<mlir::ONNXAddOp>(&arithmeticOp)) { os << "Add";      }
+  else if (dyn_cast_or_null<mlir::ONNXSubOp>(&arithmeticOp)) { os << "Subtract"; }
+  else if (dyn_cast_or_null<mlir::ONNXMulOp>(&arithmeticOp)) { os << "Mul";      }
+  else if (dyn_cast_or_null<mlir::ONNXDivOp>(&arithmeticOp)) { os << "Div";      }
+  else { return arithmeticOp.emitError("op is not onnx arithmetic!");   }
+
+  os << "<";
   if (failed(emitter.emitType(a.getLoc(), tTypeA.getElementType()))) {
     return failure();
   }
   os << ", " << channel << ">(";
-  os << stream << ", ";
-  os << height << ", ";
-  os << width << ", ";
-  os << channel * width << ", "; //stride of a
-  os << emitter.getOrCreateName(a) << ", ";
-  os << channel * width << ", "; //stride of b
-  os << emitter.getOrCreateName(b) << ", ";
-  os << channel * width << ", "; //stride of c
-  os << emitter.getOrCreateName(c);
+  os << stream                      << ", "; // stream
+  os << height                      << ", "; // height
+  os << width                       << ", "; // width
+  os << channel * width             << ", "; // stride of a
+  os << emitter.getOrCreateName(a)  << ", "; // var name of a
+  if (!dyn_cast_or_null<mlir::ONNXSubOp>(&arithmeticOp)) {
+    os << channel * width             << ", "; // stride of b
+  }
+  os << emitter.getOrCreateName(b)  << ", "; // var name of b
+  os << channel * width             << ", "; // stride of c
+  os << emitter.getOrCreateName(c);          // var name of c
   os << ");\n";
 
   return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ONNXAddOp addOp) {
+  return printONNXArithmetic<ONNXAddOp>(emitter, addOp);
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ONNXMulOp mulOp) {
+  return printONNXArithmetic<ONNXMulOp>(emitter, mulOp);
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ONNXSubOp subOp) {
+  return printONNXArithmetic<ONNXSubOp>(emitter, subOp);
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ONNXDivOp divOp) {
+  return printONNXArithmetic<ONNXDivOp>(emitter, divOp);
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
@@ -764,11 +789,13 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           //.Case<cf::BranchOp, cf::CondBranchOp>(
           //    [&](auto op) { return printOperation(*this, op); })
           // ONNX ops.
-          .Case<mlir::ONNXAbsOp, mlir::ONNXAddOp>(
+          .Case<mlir::ONNXAbsOp,
+                mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp
+                >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
                 if (failed(emitONNXPreOp(*opop)))         { return failure(); }
-                if (failed(printOperation(*this, op))) { return failure(); }
+                if (failed(printOperation(*this, op)))    { return failure(); }
                 if (failed(emitONNXPostOp(*opop)))        { return failure(); }
                 return success();
           })
