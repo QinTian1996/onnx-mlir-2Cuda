@@ -258,6 +258,17 @@ private:
   /// Track first and last use of Value
   LifeTimeTracker valueFisrtUseTracker;
   LifeTimeTracker valueLastUseTracker;
+
+public:
+  LogicalResult emitPPLShapeDeclaration(Value &value);
+
+private:
+  std::string pplCommonPrefix = "ppl::common::";
+  std::string getPPLShapeName(Value &value) {
+    return getOrCreateName(value).str() + "Shape";
+  };
+  LogicalResult emitPPLType(Type type);
+
 };
 
 CudaEmitter::CudaEmitter(raw_ostream &os, bool declareVariablesAtTop)
@@ -299,6 +310,8 @@ LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
   }
   if (auto fType = dyn_cast<FloatType>(type)) {
     switch (fType.getWidth()) {
+    case 16: 
+      return (os << "half"), success();
     case 32:
       return (os << "float"), success();
     case 64:
@@ -309,8 +322,9 @@ LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
   }
   if (auto iType = dyn_cast<IndexType>(type))
     return (os << "size_t"), success();
-
-  return emitError(loc, "cannot emit unkown type ") << type;
+  // FIXME: emit every type for now. //return emitError(loc, "cannot emit unkown type ") << type;
+  os << type;
+  return success();
 }
 
 bool CudaEmitter::shouldMapToUnsigned(IntegerType::SignednessSemantics val) {
@@ -359,6 +373,102 @@ Operation *CudaEmitter::getValueLastUse (Value value) {
   return valueLastUseTracker.lookup(value);
 }
 
+LogicalResult CudaEmitter::emitPPLType(Type type) {
+  //enum {
+  //    DATATYPE_UNKNOWN = 0,
+  //    DATATYPE_UINT8 = 1,
+  //    DATATYPE_UINT16 = 2,
+  //    DATATYPE_UINT32 = 3,
+  //    DATATYPE_UINT64 = 4,
+  //    DATATYPE_FLOAT16 = 5,
+  //    DATATYPE_FLOAT32 = 6,
+  //    DATATYPE_FLOAT64 = 7,
+  //    DATATYPE_BFLOAT16 = 8,
+  //    DATATYPE_INT4B = 9,
+  //    DATATYPE_INT8 = 10,
+  //    DATATYPE_INT16 = 11,
+  //    DATATYPE_INT32 = 12,
+  //    DATATYPE_INT64 = 13,
+  //    DATATYPE_BOOL = 14,
+  //    DATATYPE_COMPLEX64 = 15,
+  //    DATATYPE_COMPLEX128 = 16,
+  //    DATATYPE_MAX,
+  //};
+  //typedef uint32_t datatype_t;
+  os << pplCommonPrefix;
+  if (auto iType = dyn_cast<IntegerType>(type)) {
+    switch (iType.getWidth()) {
+    case 1:
+      return (os << "DATATYPE_BOOL"), success();
+    case 8:  // Shared
+    case 16: // Shared
+    case 32: // Shared
+    case 64:
+      if (shouldMapToUnsigned(iType.getSignedness()))
+        return (os << "DATATYPE_UINT" << iType.getWidth()), success();
+      else
+        return (os << "DATATYPE_INT" << iType.getWidth()), success();
+    default:
+      return failure();
+    }
+  }
+  if (auto fType = dyn_cast<FloatType>(type)) {
+    switch (fType.getWidth()) {
+    case 16: // Shared
+    case 32: // Shared
+    case 64:
+      return (os << "DATATYPE_FLOAT" << fType.getWidth()), success();
+    default:
+      return failure();
+    }
+  }
+
+  return failure();
+}
+
+LogicalResult CudaEmitter::emitPPLShapeDeclaration(Value &value) {
+  //ppl::common::TensorShape shape0, shape1, shape2;
+  //shape0.SetDimCount(3);
+  //shape0.SetDim(0, 5);
+  //shape0.SetDim(1, 6);
+  //shape0.SetDim(2, 3);
+  //shape0.SetDataType(ppl::common::DATATYPE_FLOAT32);
+  TensorType tType = dyn_cast_if_present<TensorType>(value.getType());
+  if (!tType) {
+    return emitError(value.getLoc(), "value is not TensorType!");
+  }
+
+  if (tType.getNumDynamicDims()) {
+    return (os << "ERROR: Unsupported Dynamic Tensor!\n"), success();
+    return emitError(value.getLoc(), "cannot print dynamic tensor shape for ppl!");
+  }
+
+  //Assumption: shape must be static(inferenced).
+  std::string shapeName =  getPPLShapeName(value);
+  os << "ppl::common::TensorShape " << shapeName << ";\n";
+  os << shapeName << ".setDimCount(" << tType.getRank() << ");\n";
+  for (auto i = 0; i < tType.getRank(); i++) {
+    os << shapeName << ".setDim(" << i << ", " << tType.getDimSize(i) << ");\n";
+  }
+  os << shapeName << ".SetDataType(";
+  if (failed(emitPPLType(tType.getElementType()))) {
+    return emitError(value.getLoc(), "fail to emit pplType!");
+  }
+  os << ");\n";
+
+  return success();
+}
+
+
+void printShape(CudaEmitter &emitter, TensorType tType) {
+  raw_indented_ostream &os = emitter.ostream();
+  os << "TensorShape: [";
+  for (auto i = 0; i < tType.getRank(); i++) {
+    os << (tType.isDynamicDim(i) ? "Dyn" : std::to_string(tType.getDimSize(i))) << ", ";
+  }
+  os << "]\n";
+}
+
 static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
                                         StringRef callee) {
 
@@ -393,19 +503,18 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
     return leakyReluOp.emitOpError("operand not valid tensor type!");
   }
 
-  if (tTypeX.getNumElements() != tTypeY.getNumElements()) {
-    return leakyReluOp.emitOpError("operand size not match!");
-  }
   os << "onnxLeakyReLU";
-  os << "<<<(" << tTypeX.getNumElements() << " + threads_per_block - 1)/threads_per_block, threads_per_block>>>";
+  os << "<<<(";
+  tTypeX.getNumElements(); 
+  os << " + threads_per_block - 1)/threads_per_block, threads_per_block>>>";
   os << "(";
   os << emitter.getOrCreateName(x); //X
   os << ", ";
   os << emitter.getOrCreateName(y); //Y
   os << ", ";
-  os << tTypeX.getNumElements(); //size
+  tTypeX.getNumElements();
   os << ", ";
-  os << (tTypeX.getElementTypeBitWidth() >> 3); //stride
+  os << (tTypeY.getElementTypeBitWidth() >> 3); //stride
   os << ", ";
   os << alpha.convertToFloat(); //alpha
   os << ");";
@@ -422,17 +531,8 @@ LogicalResult printONNXArithmetic(CudaEmitter &emitter, T arithmeticOp) {
   auto tTypeB = b.getType().dyn_cast_or_null<TensorType>();
   auto tTypeC = c.getType().dyn_cast_or_null<TensorType>();
   auto shapeA = tTypeA.getShape();
-  auto shapeB = tTypeB.getShape();
-  auto shapeC = tTypeC.getShape();
-
-  //Not support broadcast for diff shape for now.
-  if (!shapeA.equals(shapeB) || !shapeA.equals(shapeC)) {
-    return arithmeticOp.emitOpError("operand size not match!");
-  }
-  //Not support dynamic shape for now.
-  if (tTypeA.getNumDynamicDims()) {
-    return arithmeticOp.emitOpError("Dynamic shape not supported!");
-  }
+  //auto shapeB = tTypeB.getShape();
+  //auto shapeC = tTypeC.getShape();
 
   auto width = shapeA[0];
   auto height = tTypeA.getNumElements() / width;;
@@ -471,6 +571,9 @@ LogicalResult printONNXArithmetic(CudaEmitter &emitter, T arithmeticOp) {
   os << emitter.getOrCreateName(c);          // var name of c
   os << ");\n";
 
+  os << "a "; printShape(emitter, tTypeA);
+  os << "b "; printShape(emitter, tTypeB);
+  os << "c "; printShape(emitter, tTypeC);
   return success();
 }
 
@@ -707,6 +810,11 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
       if (failed(emitDeclaration(res))) {
         return op.emitOpError("unable to declare ssa var.");
       }
+      if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
+        if(failed(emitPPLShapeDeclaration(res))) {
+          return op.emitError("failed to emit ppl shape declaration!");
+        }
+      }
     }
 
     //Name stream and event after res[0]. Declare and init stream and event for every ONNX op.
@@ -760,7 +868,8 @@ LogicalResult CudaEmitter::emitDeclaration(Value &value) {
   os << getOrCreateName(value) << ";\n";
 
   if (auto tType = value.getType().dyn_cast<TensorType>()) {
-    os << "cudaMalloc((void**)&" << getOrCreateName(value) << ", "<< tType.getNumElements() << " * sizeof(";
+    os << "cudaMalloc((void**)&" << getOrCreateName(value) << ", "<< tType.getNumElements();
+    os << " * sizeof(";
     if (failed(emitType(value.getLoc(), tType.getElementType()))) {
       return failure();
     }
@@ -806,7 +915,12 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           // ignore entry point, we will call func somewhere else
           .Case<mlir::ONNXEntryPointOp>([&](auto op) { return success(); })
           .Default([&](Operation *) {
-            return op.emitOpError("unable to find printer for op");
+            //fixme: temp test
+            //return op.emitOpError("unable to find printer for op");
+            if (failed(emitONNXPreOp(op)))         { return failure(); }
+            os << op.getName() << " PLACEHOLDER, not impoemented yet.\n"; return success();
+            if (failed(emitONNXPostOp(op)))        { return failure(); }
+
           });
 
   if (failed(status))
@@ -855,4 +969,42 @@ void registerToCudaTranslation() {
       });
 }
 
+
+/// @brief 
+/// @param input pre malloced device mem with input tensor data
+/// @param inputShape LIST OF INTS. shape of input tensor
+/// @param inputRank rank of input tensor
+/// @param output pre malloced device mem
+/// @param outputShape LIST OF INTS shape of output tensor
+/// @param outputRank rank of output tensor
+/// @param weight pre malloced device mem
+/// @param weightShape LIST OF INTS shape of  weight tensor
+/// @param weightRank rank of weight tensor
+/// @param bias list of bias tensor
+/// @param biasSize len(bias)
+/// @param autoPadType auto pad type, default 0 is NOTSET
+/// @param dilations LIST OF INTS dilation value along each spatial axis of the filter. If not present, the dilation defaults is 1 along each spatial axis.
+/// @param group (default 1)number of groups input channels and output channels are divided into
+/// @param kernel_shape LIST OF INTS. number of groups input channels and output channels are divided into
+/// @param kernel_rank rank of kernel shape
+/// @param pads  LIST OF INTS. Padding for the beginning and ending along each spatial axis, it can take any value greater than or equal to 0. 
+/// @param pads_rank rank(pads)
+/// @param strides LIST OF INTS. Stride along each spatial axis. If not present, the stride defaults is 1 along each spatial axis.
+/// @param strides_rank rank(strides)
+/// @return result code, 0 for success, error code o/w
+int conv(
+    float *input, int *inputShape, int inputRank,
+    float *output, int *outputShape, int outputRank,
+    float *weight, int *weightShape, int weightRank,
+    float *bias, int biasSize,
+    int autoPadType, 
+    int *dilations, 
+    int group, 
+    int *kernel_shape, int kernel_rank,
+    int *pads, int pads_rank,
+    int *strides, int strides_rank
+);
+
 } // namespace mlir
+
+
