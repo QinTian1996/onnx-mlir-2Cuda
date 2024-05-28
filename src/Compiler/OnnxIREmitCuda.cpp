@@ -39,6 +39,8 @@
 using namespace mlir;
 using llvm::formatv;
 
+#define INFO(info) os << "//INFO: " << info << "\n";
+
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -554,11 +556,15 @@ LogicalResult printONNXArithmeticPPLCudaKernel(CudaEmitter &emitter, T arithmeti
   os << 1.0f                                << ", "; // scale A
   os << 1.0f                                << ", "; // scale B
   os << 1.0f                                << ", "; // scale C
-  os << ");\n";
+  os << ");";
 
+  os.indent();
+  os << "\n";
   os << "//A "; printShape(emitter, tTypeA);
   os << "//B "; printShape(emitter, tTypeB);
   os << "//C "; printShape(emitter, tTypeC);
+  os.unindent();
+
   return success();
 }
 
@@ -720,11 +726,11 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   os.indent();
   os << "\n";
 
-  //add some fiexed code
-  os << "//fixed block setting for now\n";
-  os << "int threads_per_block = 512;\n";
+  INFO("add some fixed code")
+  os << "int threads_per_block = 512;//fixed block setting for now\n";
+  os << "\n";
 
-  os << "//INFO: emit pplshape decl for func args\n";
+  INFO("emit pplshape decl for func args")
   for (auto i : funcOp.getArguments()) {
     if (failed(emitter.emitPPLShapeDeclaration(i))) {
       return funcOp.emitOpError("emit func arg ppl shape decl failed!");
@@ -768,7 +774,11 @@ void CudaEmitter::emitInclude(StringRef name, bool isLocal) {
 
 void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   StringRef prefix = "cudakernel/";
-  if (hasPplOp("onnx.Add")) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), true); }
+  if (hasPplOp("onnx.Add") || 
+      hasPplOp("onnx.Mul") ||
+      hasPplOp("onnx.Sub") ||
+      hasPplOp("onnx.Div")
+    ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), true); }
   if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), false); }
   //TODO: add other ops
 
@@ -798,7 +808,7 @@ std::string CudaEmitter::getEventName(Value value) {
 LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
   //if op has result(all onnx op  has at least one output, so just a guard here)
   if (op.getNumResults()) {
-    //SSA  var declaration
+    INFO("SSA var declaration and shape decl if SSA is TensorType")
     for (auto res : op.getResults()) {
       if (failed(emitDeclaration(res))) {
         return op.emitOpError("unable to declare ssa var.");
@@ -811,6 +821,7 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
     }
 
     //Name stream and event after res[0]. Declare and init stream and event for every ONNX op.
+    INFO("create stream and event, naming after result[0].")
     Value res0 = op.getResult(0);
     os << "cudaStream_t " << getStreamName(res0) << ";\n";
     os << "cudaStreamCreate(&" << getStreamName(res0) << ");\n";
@@ -818,7 +829,7 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
     os << "cudaEventCreate(&" << getEventName(res0) << ");\n";
     pushCudaEvent(res0);
 
-    //Wait for events for every operand
+    INFO("Wait for events for every operand.")
     if (op.getNumOperands()) {
       for (auto operand : op.getOperands()) {
         if (NULL == operand.getDefiningOp()) { continue; }
@@ -831,17 +842,17 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
 }
 
 LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
-  // 1. emit event record
+  INFO("Post proccess")
+  INFO("1. emit event record")
   os << "cudaEventRecord(" << getEventName(op.getResult(0)) << ", " << getStreamName(op.getResult(0)) << ");\n";
 
+  INFO("2. destroy first use operand`s stream (func args do not have definingOp and do not need streamdestroy)")
+  INFO("3. free last use for every operands")
   if (op.getNumOperands()) {
     for (auto operand : op.getOperands()) {
-      // 2. destroy first use operand`s stream (func args do not have definingOp and do not need streamdestroy)
       if (operand.getDefiningOp() && getValueFirstUse(operand) == (&op)) {
         os << "cudaStreamDestroy(" << getStreamName(operand) << ");\n";
       }
-
-      // 3. free last use for every operands
       if (getValueLastUse(operand) == (&op)) {
         if (failed(emitFree(operand))) {
           return failure();
