@@ -261,12 +261,12 @@ private:
 
 public:
   LogicalResult emitPPLShapeDeclaration(Value &value);
-
-private:
-  std::string pplCommonPrefix = "ppl::common::";
   std::string getPPLShapeName(Value &value) {
     return getOrCreateName(value).str() + "Shape";
   };
+
+private:
+  std::string pplCommonPrefix = "ppl::common::";
   LogicalResult emitPPLType(Type type);
 
 };
@@ -446,9 +446,9 @@ LogicalResult CudaEmitter::emitPPLShapeDeclaration(Value &value) {
   //Assumption: shape must be static(inferenced).
   std::string shapeName =  getPPLShapeName(value);
   os << "ppl::common::TensorShape " << shapeName << ";\n";
-  os << shapeName << ".setDimCount(" << tType.getRank() << ");\n";
+  os << shapeName << ".SetDimCount(" << tType.getRank() << ");\n";
   for (auto i = 0; i < tType.getRank(); i++) {
-    os << shapeName << ".setDim(" << i << ", " << tType.getDimSize(i) << ");\n";
+    os << shapeName << ".SetDim(" << i << ", " << tType.getDimSize(i) << ");\n";
   }
   os << shapeName << ".SetDataType(";
   if (failed(emitPPLType(tType.getElementType()))) {
@@ -464,7 +464,7 @@ void printShape(CudaEmitter &emitter, TensorType tType) {
   raw_indented_ostream &os = emitter.ostream();
   os << "TensorShape: [";
   for (auto i = 0; i < tType.getRank(); i++) {
-    os << (tType.isDynamicDim(i) ? "Dyn" : std::to_string(tType.getDimSize(i))) << ", ";
+    os << ( (i == 0)? "" : ", ") << (tType.isDynamicDim(i) ? "Dyn" : std::to_string(tType.getDimSize(i)));
   }
   os << "]\n";
 }
@@ -498,6 +498,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
   llvm::APFloat alpha = leakyReluOp.getAlpha();
   auto tTypeX = x.getType().dyn_cast_or_null<TensorType>();
   auto tTypeY = y.getType().dyn_cast_or_null<TensorType>();
+  ONNXConstantOp constOp;
 
   if ((!tTypeX) || (!tTypeY)) {
     return leakyReluOp.emitOpError("operand not valid tensor type!");
@@ -522,7 +523,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
 }
 
 template <typename T>
-LogicalResult printONNXArithmetic(CudaEmitter &emitter, T arithmeticOp) {
+LogicalResult printONNXArithmeticPPLCudaKernel(CudaEmitter &emitter, T arithmeticOp) {
   raw_indented_ostream &os = emitter.ostream();
   Value a = arithmeticOp.getA();
   Value b = arithmeticOp.getB();
@@ -530,67 +531,51 @@ LogicalResult printONNXArithmetic(CudaEmitter &emitter, T arithmeticOp) {
   auto tTypeA = a.getType().dyn_cast_or_null<TensorType>();
   auto tTypeB = b.getType().dyn_cast_or_null<TensorType>();
   auto tTypeC = c.getType().dyn_cast_or_null<TensorType>();
-  auto shapeA = tTypeA.getShape();
-  //auto shapeB = tTypeB.getShape();
-  //auto shapeC = tTypeC.getShape();
-
-  auto width = shapeA[0];
-  auto height = tTypeA.getNumElements() / width;;
-  auto channel = 1;
   auto stream = emitter.getStreamName(c);
-  /*
-  *   c = a + b
-  *   ppl::cv::cuda::Add<float, 3>( stream, height, width,
-  *                                 channel * width, a,
-  *                                 channel * width, b,
-  *                                 channel * width, c);
-  *
-  */
-  os << "ppl::cv::cuda::";
+
+  //   PPLCUDAArithMeticAddForwardImp(stream,
+  //     &shapeA, a,
+  //     &shapeB, b,
+  //     &shapeC, c);
+  os << "PPLCUDAArithMetic";
   if      (dyn_cast_or_null<mlir::ONNXAddOp>(&arithmeticOp)) { os << "Add";      }
-  else if (dyn_cast_or_null<mlir::ONNXSubOp>(&arithmeticOp)) { os << "Subtract"; }
+  else if (dyn_cast_or_null<mlir::ONNXSubOp>(&arithmeticOp)) { os << "Sub";      }
   else if (dyn_cast_or_null<mlir::ONNXMulOp>(&arithmeticOp)) { os << "Mul";      }
   else if (dyn_cast_or_null<mlir::ONNXDivOp>(&arithmeticOp)) { os << "Div";      }
-  else { return arithmeticOp.emitError("op is not onnx arithmetic!");   }
-
-  os << "<";
-  if (failed(emitter.emitType(a.getLoc(), tTypeA.getElementType()))) {
-    return failure();
-  }
-  os << ", " << channel << ">(";
-  os << stream                      << ", "; // stream
-  os << height                      << ", "; // height
-  os << width                       << ", "; // width
-  os << channel * width             << ", "; // stride of a
-  os << emitter.getOrCreateName(a)  << ", "; // var name of a
-  if (!dyn_cast_or_null<mlir::ONNXSubOp>(&arithmeticOp)) {
-    os << channel * width             << ", "; // stride of b
-  }
-  os << emitter.getOrCreateName(b)  << ", "; // var name of b
-  os << channel * width             << ", "; // stride of c
-  os << emitter.getOrCreateName(c);          // var name of c
+  else { return arithmeticOp.emitError("op is not onnx arithmetic!");            }
+  os << "ForwardImp(";
+  os << stream                              << ", "; // stream
+  os << "&" << emitter.getPPLShapeName(a)   << ", "; // shape of A
+  os << emitter.getOrCreateName(a)          << ", "; // A
+  os << "&" << emitter.getPPLShapeName(b)   << ", "; // shape of B
+  os << emitter.getOrCreateName(b)          << ", "; // B
+  os << "&" << emitter.getPPLShapeName(c)   << ", "; // shape of C
+  os << emitter.getOrCreateName(c)          << ", "; // C
+  os << 1.0f                                << ", "; // scale A
+  os << 1.0f                                << ", "; // scale B
+  os << 1.0f                                << ", "; // scale C
   os << ");\n";
 
-  os << "a "; printShape(emitter, tTypeA);
-  os << "b "; printShape(emitter, tTypeB);
-  os << "c "; printShape(emitter, tTypeC);
+  os << "//A "; printShape(emitter, tTypeA);
+  os << "//B "; printShape(emitter, tTypeB);
+  os << "//C "; printShape(emitter, tTypeC);
   return success();
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ONNXAddOp addOp) {
-  return printONNXArithmetic<ONNXAddOp>(emitter, addOp);
+  return printONNXArithmeticPPLCudaKernel<ONNXAddOp>(emitter, addOp);
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ONNXMulOp mulOp) {
-  return printONNXArithmetic<ONNXMulOp>(emitter, mulOp);
+  return printONNXArithmeticPPLCudaKernel<ONNXMulOp>(emitter, mulOp);
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ONNXSubOp subOp) {
-  return printONNXArithmetic<ONNXSubOp>(emitter, subOp);
+  return printONNXArithmeticPPLCudaKernel<ONNXSubOp>(emitter, subOp);
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ONNXDivOp divOp) {
-  return printONNXArithmetic<ONNXDivOp>(emitter, divOp);
+  return printONNXArithmeticPPLCudaKernel<ONNXDivOp>(emitter, divOp);
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
@@ -736,8 +721,16 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   os << "\n";
 
   //add some fiexed code
-  os << "int threads_per_block = 512; //fixed block setting for now\n";
+  os << "//fixed block setting for now\n";
+  os << "int threads_per_block = 512;\n";
 
+  os << "//INFO: emit pplshape decl for func args\n";
+  for (auto i : funcOp.getArguments()) {
+    if (failed(emitter.emitPPLShapeDeclaration(i))) {
+      return funcOp.emitOpError("emit func arg ppl shape decl failed!");
+    }
+  }
+  os << "\n";
 
   // 遍历当前操作的所有子区域（如果有）
   for (Region &region : funcOp->getRegions()) {
@@ -774,8 +767,8 @@ void CudaEmitter::emitInclude(StringRef name, bool isLocal) {
 
 
 void CudaEmitter::printPplInc(CudaEmitter &emitter) {
-  StringRef prefix = "ppl/cv/cuda/";
-  if (hasPplOp("onnx.Add")) { emitter.emitInclude(prefix.str().append("arithmetic.h"), false); }
+  StringRef prefix = "cudakernel/";
+  if (hasPplOp("onnx.Add")) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), true); }
   if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), false); }
   //TODO: add other ops
 
