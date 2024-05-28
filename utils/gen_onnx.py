@@ -5,29 +5,26 @@ import onnx.printer
 
 graph_proto = onnx.helper.make_graph(
     [
-        onnx.helper.make_node("Add", ["A0", "A1"], ["R0"]),
-        onnx.helper.make_node("Sub", ["A1", "R0"], ["R1"]),
-        onnx.helper.make_node("Mul", ["R0", "R1"], ["R2"]),
-        onnx.helper.make_node("Div", ["R1", "R2"], ["R3"]),
-        onnx.helper.make_node("Add", ["A0", "A1"], ["R4"]),
-        onnx.helper.make_node("Add", ["R3", "R4"], ["R5"]),
+        onnx.helper.make_node("Add", ["V0", "V1"], ["V2"]),
+        onnx.helper.make_node("Sub", ["V1", "V2"], ["V3"]),
+        onnx.helper.make_node("Concat", ["V1", "V2", "V3"], ["V4"], axis=1),
+        #onnx.helper.make_node("Div", ["R2", "R2"], ["R3"]),
+        #onnx.helper.make_node("Add", ["A0", "A1"], ["R4"]),
+        #onnx.helper.make_node("Add", ["R3", "R4"], ["R5"]),
     ],
     "ADD",
     [
-        onnx.helper.make_tensor_value_info("A0" , onnx.TensorProto.FLOAT, [5, 6, 7]),
-        onnx.helper.make_tensor_value_info("A1" , onnx.TensorProto.FLOAT, [5, 6, 7]),
+        onnx.helper.make_tensor_value_info("V0" , onnx.TensorProto.FLOAT, [5, 6, 7]),
+        onnx.helper.make_tensor_value_info("V1" , onnx.TensorProto.FLOAT, [5, 6, 7]),
     ],
     [
-        onnx.helper.make_tensor_value_info("R5", onnx.TensorProto.FLOAT, [5, 6, 7]),
+        onnx.helper.make_tensor_value_info("V4", onnx.TensorProto.FLOAT, [5, 18, 7]),
     ],
     None,
     None,
     [
-        onnx.helper.make_tensor_value_info("R0" , onnx.TensorProto.FLOAT, [5, 6, 7]),
-        onnx.helper.make_tensor_value_info("R1" , onnx.TensorProto.FLOAT, [5, 6, 7]),
-        onnx.helper.make_tensor_value_info("R2" , onnx.TensorProto.FLOAT, [5, 6, 7]),
-        onnx.helper.make_tensor_value_info("R3" , onnx.TensorProto.FLOAT, [5, 6, 7]),
-        onnx.helper.make_tensor_value_info("R4" , onnx.TensorProto.FLOAT, [5, 6, 7]),
+        onnx.helper.make_tensor_value_info("V2" , onnx.TensorProto.FLOAT, [5, 6, 7]),
+        onnx.helper.make_tensor_value_info("V3" , onnx.TensorProto.FLOAT, [5, 6, 7]),
     ],
 )
 

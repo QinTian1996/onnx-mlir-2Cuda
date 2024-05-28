@@ -25,6 +25,8 @@
 
 #include "src/Dialect/ONNX/ONNXOps.hpp"
 #include "src/Compiler/OnnxIREmitCuda.hpp"
+#include "src/Dialect/ONNX/ElementsAttr/DisposablePool.hpp"
+
 
 #include <utility>
 #include <stack>
@@ -584,6 +586,189 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXDivOp divOp) {
   return printONNXArithmeticPPLCudaKernel<ONNXDivOp>(emitter, divOp);
 }
 
+LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value res = concatOp.getResult();
+  auto operands = concatOp.getOperands();
+ 
+  INFO("collect input_dims and input_padded_dims, since ONNX.concat does not have pad attr, these 2 same.")
+  INFO("need to convert int64 * dims to int32 *")
+
+  // collect shapes
+  os << "pplConcatInputShapes.clear();\n";
+  for (auto i : operands) {
+    os << "pplConcatInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
+  }
+
+  os <<  "int **" << emitter.getOrCreateName(res) << "PPLConcatInputDims = createPPLDims(pplConcatInputShapes);\n";
+
+  INFO("collect inputs.");
+  os << "void *" << emitter.getOrCreateName(res) << "ONNXConcatOpInputs[] = {";
+  for (auto i : operands) {
+    os << emitter.getOrCreateName(i) << ", ";
+  }
+  os << "};\n";
+
+  std::string stream = emitter.getStreamName(res);
+  auto axis = concatOp.getAxis();
+  auto numInput = concatOp.getNumOperands();
+
+  os << "PPLCUDAConcatForwardImp(";                                       //  ppl::common::RetCode PPLCUDAConcatForwardImp(
+  os << stream                                                    << ", ";//      cudaStream_t stream,
+  os << axis                                                      << ", ";//      int axis,
+  os << numInput                                                  << ", ";//      int num_inputs,
+  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";//      int* input_dims[],
+  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";//      int* input_padded_dims[],
+  os << emitter.getOrCreateName(res) << "ONNXConcatOpInputs"      << ", ";//      const void* inputs[],
+  os << emitter.getPPLShapeName(res)                              << ", ";//      ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(res)                              << ", ";//      void* output,
+  os << "0"                                                       << ");";//      int mask = 0);
+  os << "\n";
+
+  os << "destroyPPLDims(" << emitter.getOrCreateName(res) << "PPLConcatInputDims";
+  os << ", pplConcatInputShapes.size());\n";
+  os << "pplConcatInputShapes.clear();\n";
+
+  return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value res = constantOp.getResult();
+  size_t size = 0;
+  Type type = res.getType();
+
+  if (constantOp.getSparseValue().has_value()) {
+    return constantOp.emitError("Only support dense values at this time");
+  }
+  assert(constantOp.getValue().has_value() && "Value is not set");
+  if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
+    if (auto tType = res.getType().dyn_cast<TensorType>()) {
+      auto eType = tType.getElementType();
+      if (failed(emitter.emitType(res.getLoc(), eType))) {
+        return failure();
+      }
+      os << " " << emitter.getOrCreateName(res) << "constant[] = {";
+      if (eType.isa<Float16Type>()) {
+        auto t =  tensorAttr.getArray<float_16>();
+        auto t1 = t.get();
+        for(auto i : t1) { os << i.toFloat() << ", "; }
+      }
+      else if (eType.isa<Float32Type>()) {
+        auto t =  tensorAttr.getArray<float>();
+        auto t1 = t.get();
+        for(auto i : t1) { os << i << ", "; }
+      } else if (eType.isa<IntegerType>()) {
+        auto iType = eType.dyn_cast<IntegerType>();
+        if (iType.getWidth() == 64) {
+          auto t =  tensorAttr.getArray<int64_t>();
+          auto t1 = t.get();
+          for(auto i : t1) { os << i << ", "; }
+        } else if (iType.getWidth() == 32) {
+          auto t =  tensorAttr.getArray<int32_t>();
+          auto t1 = t.get();
+          for(auto i : t1) { os << i << ", "; }
+        } else if (iType.getWidth() == 16) {
+          auto t =  tensorAttr.getArray<int16_t>();
+          auto t1 = t.get();
+          for(auto i : t1) { os << i << ", "; }
+        } else if (iType.getWidth() == 8) {
+          auto t =  tensorAttr.getArray<int8_t>();
+          auto t1 = t.get();
+          for(auto i : t1) { os << (int)i << ", "; }
+        } else {
+          os << "WTF: ??? " << res.getLoc() << "\n"; 
+        }
+      } else {
+        os << "WTF: ??? " << res.getLoc() << "\n";
+      }
+      
+      os << "};\n";
+    }
+
+    return success();
+  }
+
+  if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DenseElementsAttr>()) {
+    if (TensorType tType = type.dyn_cast<TensorType>()) {
+      Type eType = tType.getElementType();
+      if (auto intDenseAttr = tensorAttr.dyn_cast_or_null<DenseIntElementsAttr>()) {
+        if (auto iType = eType.dyn_cast<IntegerType>()) {
+          auto valueRange = intDenseAttr.getValues<IntegerAttr>();
+
+          if (failed(emitter.emitType(res.getLoc(), iType))) {
+            return constantOp.emitError("emit dense ints const value failed!");
+          }
+          os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
+          for (auto i : valueRange) {
+            os << *i.getValue().getRawData() << ", ";
+          }
+          os <<"};\n";
+          size = valueRange.size() * iType.getWidth() / 8;
+        }
+      } else if (auto floatDenseAttr = tensorAttr.dyn_cast_or_null<DenseFPElementsAttr>()) {
+        auto valueRange = floatDenseAttr.getValues<FloatAttr>();
+        if (auto fType = eType.dyn_cast<FloatType>()) {
+          if (failed(emitter.emitType(res.getLoc(), fType))) {
+            return constantOp.emitError("emit dense ints const value failed!");
+          }
+          os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
+          for (auto i : valueRange) {
+            os << i.getValue().convertToFloat() << ", ";
+          }
+          os <<"};\n";
+          size = valueRange.size() * fType.getWidth() / 8;
+        }
+      }
+    }
+  } else if (constantOp.getValueFloat().has_value()) {
+    float f = constantOp.getValueFloat().value().convertToFloat();
+    os << emitter.getOrCreateName(res) << " = " << f << ";\n";
+  } else if (constantOp.getValueFloats().has_value()) {
+    auto fs = constantOp.getValueFloats().value();
+    os << "float " << emitter.getOrCreateName(res) << "Constant[] = {";
+    for (auto i : fs.getValue()) {
+      os << i.cast<FloatAttr>().getValue().convertToFloat() << ", ";
+    }
+    os << "};\n";
+    size = sizeof(float) * fs.size();
+  } else if (constantOp.getValueInt().has_value()) {
+    int i = constantOp.getValueInt().value();
+    os << emitter.getOrCreateName(res) << " = " << i << ";\n";
+  } else if (constantOp.getValueInts().has_value()) {
+    auto fs = constantOp.getValueInts().value().getValue();
+    os << "int " << emitter.getOrCreateName(res) << "Constant[] = {";
+    for (auto i : fs) {
+      os << i.dyn_cast<IntegerAttr>().getValue() << ", ";
+    }
+    os << "};\n";
+    size = sizeof(int) * fs.size();
+  } else if (constantOp.getValueString().has_value()) {
+    os << "char *" << emitter.getOrCreateName(res) << "Constant[] = \"";
+    os <<  constantOp.getValueString().value() << "\"\n";
+    size = constantOp.getValueString().value().size();
+  } else if (constantOp.getValueStrings().has_value()) {
+    return constantOp.emitError("wtf wtf wtf!");
+  } else {
+    llvm::errs() << "constant type : " << res.getType() << "\n";
+    //llvm::errs() << "type : " << constantOp.getValueAttr() << "\n";
+    return constantOp.emitError("string list and other constant type not supported yet!");
+  }
+
+  if (size) {
+    os << "cudaMemcpyAsync(";
+    os << emitter.getOrCreateName(res) << ", "; //dst
+    os << emitter.getOrCreateName(res) << "Constant" << ", "; //src
+    os << size << ", ";
+    os << "cudaMemcpyHostToDevice, ";
+    os << emitter.getStreamName(res) << ");\n";
+  }
+
+  return success();
+}
+
+
+
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   Operation *operation = callOp.getOperation();
   StringRef callee = callOp.getCallee();
@@ -658,7 +843,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
 
     os << "return;";
     return success();
-
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
@@ -730,6 +914,11 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   os << "int threads_per_block = 512;//fixed block setting for now\n";
   os << "\n";
 
+  INFO("prepare some re-use var for ops")
+  if (emitter.hasPplOp("onnx.Concat")) {
+    os << "std::vector<ppl::common::TensorShape> pplConcatInputShapes;\n";
+  }
+
   INFO("emit pplshape decl for func args")
   for (auto i : funcOp.getArguments()) {
     if (failed(emitter.emitPPLShapeDeclaration(i))) {
@@ -773,22 +962,46 @@ void CudaEmitter::emitInclude(StringRef name, bool isLocal) {
 
 
 void CudaEmitter::printPplInc(CudaEmitter &emitter) {
+  bool isLocal = true;
   StringRef prefix = "cudakernel/";
   if (hasPplOp("onnx.Add") || 
       hasPplOp("onnx.Mul") ||
       hasPplOp("onnx.Sub") ||
       hasPplOp("onnx.Div")
-    ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), true); }
-  if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), false); }
-  //TODO: add other ops
-
+    ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), isLocal); }
+  if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), isLocal); }
+  if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
   os << "\n";
+}
+
+void printHelperFunction(CudaEmitter &emitter) {
+  raw_indented_ostream &os = emitter.ostream();
+  os << "__host__ int **createPPLDims(std::vector<ppl::common::TensorShape> &shapes) {\n";
+  os << "  int **res = (int **)malloc(sizeof(*res) * shapes.size());\n";
+  os << "  for (auto i = 0; i < shapes.size(); i++) {\n";
+  os << "    int *dims = (int *)malloc(sizeof(*dims) *shapes.size());\n";
+  os << "    const int64_t *shapeDims = shapes[i].GetDims();\n";
+  os << "    for (auto j = 0; j < shapes[i].GetDimCount(); j++) {\n";
+  os << "      dims[j] = (int32_t)shapeDims[j];\n";
+  os << "    }\n";
+  os << "    res[i] = dims;\n";
+  os << "  }\n";
+  os << "\n";
+  os << "  return res;\n";
+  os << "}\n\n";
+  os << "__host__ void destroyPPLDims(int **ptr, int numShape) {\n";
+  os << "  for (auto i = 0; i < numShape; i++) {\n";
+  os << "    free(ptr[i]);\n";
+  os << "  }\n";
+  os << "  free(ptr);\n";
+  os << "}\n\n\n";
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
   printFixedCode(emitter);
   emitter.collectPplInc(emitter, moduleOp);
   emitter.printPplInc(emitter);
+  printHelperFunction(emitter);
   for (Operation &op : moduleOp) {
     if (failed(emitter.emitOperation(op, /*trailingSemicolon=*/false)))
       return failure();
@@ -860,16 +1073,19 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
       }
     }
   }
+  os << "\n\n";
 
   return success();
 }
 
 LogicalResult CudaEmitter::emitDeclaration(Value &value) {
+  INFO(value.getLoc());
   if (failed(this->emitType(value.getLoc(), value.getType()))) {
     return failure();
   }
 
-  os << getOrCreateName(value) << ";\n";
+  os << getOrCreateName(value) << ";";
+  os << "\n";
 
   if (auto tType = value.getType().dyn_cast<TensorType>()) {
     os << "cudaMalloc((void**)&" << getOrCreateName(value) << ", "<< tType.getNumElements();
@@ -903,10 +1119,12 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           //    [&](auto op) { return printOperation(*this, op); })
           // ONNX ops.
           .Case<mlir::ONNXAbsOp,
-                mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp
+                mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
+                mlir::ONNXConcatOp, mlir::ONNXConstantOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
+                INFO(op.getLoc())
                 if (failed(emitONNXPreOp(*opop)))         { return failure(); }
                 if (failed(printOperation(*this, op)))    { return failure(); }
                 if (failed(emitONNXPostOp(*opop)))        { return failure(); }

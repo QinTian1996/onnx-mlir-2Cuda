@@ -23,8 +23,8 @@ namespace onnx_mlir {
 /* Keep in sync with enumeration in PyOnnxMirCompiler.hpp python module. */
 typedef enum {
   EmitONNXBasic,
-  EmitONNXIR,
   EmitCuda,
+  EmitONNXIR,
   EmitMLIR,
   EmitLLVMIR,
   EmitObj,
