@@ -552,10 +552,10 @@ LogicalResult printONNXArithmeticPPLCudaKernel(CudaEmitter &emitter, T arithmeti
   os << "&" << emitter.getPPLShapeName(b)   << ", "; // shape of B
   os << emitter.getOrCreateName(b)          << ", "; // B
   os << "&" << emitter.getPPLShapeName(c)   << ", "; // shape of C
-  os << emitter.getOrCreateName(c)          << ", "; // C
-  os << 1.0f                                << ", "; // scale A
-  os << 1.0f                                << ", "; // scale B
-  os << 1.0f                                << ", "; // scale C
+  os << emitter.getOrCreateName(c)                 ; // C
+  //os << 1.0f                                << ", "; // scale A
+  //os << 1.0f                                << ", "; // scale B
+  //os << 1.0f                                ; // scale C
   os << ");";
 
   os.indent();
@@ -600,7 +600,7 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
     FunctionType funcType = funcOp.getFunctionType();
     ArrayAttr resAttrs = funcOp.getResAttrsAttr();
     auto returnOprands = returnOp.getOperands();
-
+ 
     if (returnOp.getNumOperands() != funcType.getNumResults()) {
       return returnOp.emitError("return value number does not match the function output number!");
     }
