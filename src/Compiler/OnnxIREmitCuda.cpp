@@ -586,6 +586,45 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXDivOp divOp) {
   return printONNXArithmeticPPLCudaKernel<ONNXDivOp>(emitter, divOp);
 }
 
+LogicalResult printOperation(CudaEmitter &emitter, ONNXPowOp powOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value a = powOp.getX();
+  Value b = powOp.getY();
+  Value c = powOp.getZ();
+  auto tTypeA = a.getType().dyn_cast_or_null<TensorType>();
+  auto tTypeB = b.getType().dyn_cast_or_null<TensorType>();
+  auto tTypeC = c.getType().dyn_cast_or_null<TensorType>();
+  auto stream = emitter.getStreamName(c);
+
+  //   PPLCUDAArithMeticAddForwardImp(stream,
+  //     &shapeA, a,
+  //     &shapeB, b,
+  //     &shapeC, c);
+  os << "PPLCUDAArithMetic";
+  os << "Pow";
+  os << "ForwardImp(";
+  os << stream                              << ", "; // stream
+  os << "&" << emitter.getPPLShapeName(a)   << ", "; // shape of A
+  os << emitter.getOrCreateName(a)          << ", "; // A
+  os << "&" << emitter.getPPLShapeName(b)   << ", "; // shape of B
+  os << emitter.getOrCreateName(b)          << ", "; // B
+  os << "&" << emitter.getPPLShapeName(c)   << ", "; // shape of C
+  os << emitter.getOrCreateName(c)                 ; // C
+  //os << 1.0f                              << ", "; // scale A
+  //os << 1.0f                              << ", "; // scale B
+  //os << 1.0f                                     ; // scale C
+  os << ");";
+
+  os.indent();
+  os << "\n";
+  os << "//A "; printShape(emitter, tTypeA);
+  os << "//B "; printShape(emitter, tTypeB);
+  os << "//C "; printShape(emitter, tTypeC);
+  os.unindent();
+
+  return success();
+}
+
 LogicalResult printOperation(CudaEmitter &emitter, ONNXMaxPoolSingleOutOp maxPoolSingleOutOp) {
   raw_indented_ostream &os = emitter.ostream();
   Value res = maxPoolSingleOutOp.getResult();
@@ -673,7 +712,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
   }
   assert(constantOp.getValue().has_value() && "Value is not set");
 
-  //FIXME:
+  //FIXME: enable constant print
   bool showConstContent = false;
   if(!showConstContent) { return success(); }
   if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
@@ -1003,7 +1042,8 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.Add") || 
       hasPplOp("onnx.Mul") ||
       hasPplOp("onnx.Sub") ||
-      hasPplOp("onnx.Div")
+      hasPplOp("onnx.Div") ||
+      hasPplOp("onnx.Pow")
     ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), isLocal); }
   if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), isLocal); }
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
@@ -1157,7 +1197,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           // ONNX ops.
           .Case<mlir::ONNXAbsOp,
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
-                mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp
+                mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
+                mlir::ONNXPowOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
