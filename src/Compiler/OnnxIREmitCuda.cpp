@@ -663,12 +663,12 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   INFO("need to convert int64 * dims to int32 *")
 
   // collect shapes
-  os << "pplConcatInputShapes.clear();\n";
+  os << "pplInputShapes.clear();\n";
   for (auto i : operands) {
-    os << "pplConcatInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
+    os << "pplInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
   }
 
-  os <<  "int **" << emitter.getOrCreateName(res) << "PPLConcatInputDims = createPPLDims(pplConcatInputShapes);\n";
+  os <<  "int **" << emitter.getOrCreateName(res) << "pplInputDims = createPPLDims(pplInputShapes);\n";
 
   INFO("collect inputs.");
   os << "void *" << emitter.getOrCreateName(res) << "ONNXConcatOpInputs[] = {";
@@ -685,17 +685,18 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   os << stream                                                    << ", ";  //      cudaStream_t stream,
   os << axis                                                      << ", ";  //      int axis,
   os << numInput                                                  << ", ";  //      int num_inputs,
-  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";  //      int* input_dims[],
-  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";  //      int* input_padded_dims[],
+  os << emitter.getOrCreateName(res) << "pplInputDims"            << ", ";  //      int* input_dims[],
+  os << emitter.getOrCreateName(res) << "pplInputDims"            << ", ";  //      int* input_padded_dims[],
   os << emitter.getOrCreateName(res) << "ONNXConcatOpInputs"      << ", ";  //      const void* inputs[],
   os << emitter.getPPLShapeName(res)                              << ", ";  //      ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(res)                              << ", ";  //      void* output,
   os << "0"                                                       << ");";  //      int mask = 0);
   os << "\n";
 
-  os << "destroyPPLDims(" << emitter.getOrCreateName(res) << "PPLConcatInputDims";
-  os << ", pplConcatInputShapes.size());\n";
-  os << "pplConcatInputShapes.clear();\n";
+  os << "destroyPPLDims(" << emitter.getOrCreateName(res) << "pplInputDims";
+  os << ", pplInputShapes.size());\n";
+  os << "pplInputDims = NULL;\n";
+  os << "pplInputShapes.clear();\n";
 
   return success();
 }
@@ -999,6 +1000,39 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXSigmoidOp sigmoidOp
   return success();
 }
 
+LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  std::vector<Value> results;
+  Value input = splitOp.getInput();
+
+  os << "pplInputShapes.clear();\n";
+
+
+  for (auto i : splitOp.getResults()) {
+    results.push_back(i);
+    os << "pplInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
+  }
+
+  os << "pplInputDims = createPPLDims(pplInputShapes);\n";
+  os << "void *" << emitter.getOrCreateName(results[0]) << "SplitOutputs[] = {";
+  for (auto i : results) {
+    os << emitter.getOrCreateName(i) << ", ";
+  }
+  os << "};\n";
+  
+  os << "PPLCUDASplitForwardImp(";                                        //ppl::common::RetCode PPLCUDASplitForwardImp(
+  os << emitter.getStreamName(results[0]) << ", ";                        //  cudaStream_t stream,
+  os << (int)splitOp.getAxis() << ", ";                                        //  int split_axis,
+  os << emitter.getPPLShapeName(input) << ", ";                           //  const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(input) << ", ";                           //  const void* input,
+  os << splitOp.getNumResults() << ", ";                                  //  int num_outputs,
+  os << "pplInputDims" << ", ";                                           //  const int64_t* out_dims[],
+  os << emitter.getOrCreateName(results[0]) << "SplitOutputs" << ");\n";  //  void* output[]);
+
+  os << "destroyPPLDims(pplInputDims, pplInputShapes.size());\n";
+  return success();
+}
+
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   Operation *operation = callOp.getOperation();
   StringRef callee = callOp.getCallee();
@@ -1144,8 +1178,11 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   os << "\n";
 
   INFO("prepare some re-use var for ops")
-  if (emitter.hasPplOp("onnx.Concat")) {
-    os << "std::vector<ppl::common::TensorShape> pplConcatInputShapes;\n";
+  if (emitter.hasPplOp("onnx.Concat") ||
+      emitter.hasPplOp("onnx.SplitV13")
+  ) {
+    os << "std::vector<ppl::common::TensorShape> pplInputShapes;\n";
+    os << "int **pplInputDims;\n";
   }
 
   INFO("emit pplshape decl for func args")
@@ -1206,6 +1243,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
   if (hasPplOp("onnx.Reshape")) { emitter.emitInclude(prefix.str().append("memory/reshape.h"), isLocal);}
   if (hasPplOp("onnx.ResizeV13")) { emitter.emitInclude(prefix.str().append("nn/resize.h"), isLocal);}
+  if (hasPplOp("onnx.SplitV13")) { emitter.emitInclude(prefix.str().append("memory/split.h"), isLocal);}
   os << "\n";
 }
 
@@ -1357,7 +1395,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
                 mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
-                mlir::ONNXSigmoidOp
+                mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
