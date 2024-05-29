@@ -1023,13 +1023,43 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
   os << "PPLCUDASplitForwardImp(";                                        //ppl::common::RetCode PPLCUDASplitForwardImp(
   os << emitter.getStreamName(results[0]) << ", ";                        //  cudaStream_t stream,
   os << (int)splitOp.getAxis() << ", ";                                        //  int split_axis,
-  os << emitter.getPPLShapeName(input) << ", ";                           //  const ppl::common::TensorShape* input_shape,
+  os << "&" << emitter.getPPLShapeName(input) << ", ";                           //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                           //  const void* input,
   os << splitOp.getNumResults() << ", ";                                  //  int num_outputs,
   os << "pplInputDims" << ", ";                                           //  const int64_t* out_dims[],
   os << emitter.getOrCreateName(results[0]) << "SplitOutputs" << ");\n";  //  void* output[]);
 
   os << "destroyPPLDims(pplInputDims, pplInputShapes.size());\n";
+  return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXTransposeOp transposeOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value Y = transposeOp.getResult();
+  Value X = transposeOp.getOperand();
+  auto perm = transposeOp.getPerm();
+
+  std::string kernelParamName = emitter.getOrCreateName(Y).str() + "transposeKernelParam";
+  os << "TransposeKernelParam " << kernelParamName << ";\n";
+  if (perm.has_value()) {
+    for (auto i : perm.value()) {
+      os << kernelParamName << ".perm.push_back(" << i.dyn_cast<IntegerAttr>().getValue() << ");\n";
+    }
+  } else {
+    for (auto i = 0; i < (int)perm.value().size(); i++) {
+      os << kernelParamName << ".perm.push_back(" << i << ");\n";
+    }
+  }
+
+  os << "PPLCUDATransposeForwardImp("; //ppl::common::RetCode PPLCUDATransposeForwardImp(
+  os << emitter.getStreamName(Y) << ", "; //    cudaStream_t stream,
+  os << kernelParamName << ", "; //    TransposeKernelParam param,
+  os << "&" << emitter.getPPLShapeName(X) << ", "; //    const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(X) << ", "; //    const void* input,
+  os << "&" << emitter.getPPLShapeName(Y) << ", "; //    const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(Y) << ");\n"; //    void* output);
+
+
   return success();
 }
 
@@ -1185,6 +1215,10 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
     os << "int **pplInputDims;\n";
   }
 
+  if (emitter.hasPplOp("onnx.Transpose")) {
+
+  }
+
   INFO("emit pplshape decl for func args")
   for (auto i : funcOp.getArguments()) {
     if (failed(emitter.emitPPLShapeDeclaration(i))) {
@@ -1244,6 +1278,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.Reshape")) { emitter.emitInclude(prefix.str().append("memory/reshape.h"), isLocal);}
   if (hasPplOp("onnx.ResizeV13")) { emitter.emitInclude(prefix.str().append("nn/resize.h"), isLocal);}
   if (hasPplOp("onnx.SplitV13")) { emitter.emitInclude(prefix.str().append("memory/split.h"), isLocal);}
+  if (hasPplOp("onnx.Transpose")) { emitter.emitInclude(prefix.str().append("memory/transpose.h"), isLocal);}
   os << "\n";
 }
 
@@ -1395,7 +1430,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
                 mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
-                mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op
+                mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op, mlir::ONNXTransposeOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
