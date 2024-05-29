@@ -324,6 +324,10 @@ LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
       return emitError(loc, "cannot emit float type ") << type;
     }
   }
+  if (auto nType = dyn_cast<NoneType>(type)) {
+    os << "int";
+    return success();
+  }
   if (auto iType = dyn_cast<IndexType>(type))
     return (os << "size_t"), success();
   // FIXME: emit every type for now. //return emitError(loc, "cannot emit unkown type ") << type;
@@ -1051,13 +1055,13 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXTransposeOp transpo
     }
   }
 
-  os << "PPLCUDATransposeForwardImp("; //ppl::common::RetCode PPLCUDATransposeForwardImp(
-  os << emitter.getStreamName(Y) << ", "; //    cudaStream_t stream,
-  os << kernelParamName << ", "; //    TransposeKernelParam param,
-  os << "&" << emitter.getPPLShapeName(X) << ", "; //    const ppl::common::TensorShape* input_shape,
-  os << emitter.getOrCreateName(X) << ", "; //    const void* input,
-  os << "&" << emitter.getPPLShapeName(Y) << ", "; //    const ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(Y) << ");\n"; //    void* output);
+  os << "PPLCUDATransposeForwardImp(";              //ppl::common::RetCode PPLCUDATransposeForwardImp(
+  os << emitter.getStreamName(Y) << ", ";           //    cudaStream_t stream,
+  os << kernelParamName << ", ";                    //    TransposeKernelParam param,
+  os << "&" << emitter.getPPLShapeName(X) << ", ";  //    const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(X) << ", ";         //    const void* input,
+  os << "&" << emitter.getPPLShapeName(Y) << ", ";  //    const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(Y) << ");\n";       //    void* output);
 
 
   return success();
@@ -1440,6 +1444,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 if (failed(emitONNXPostOp(*opop)))        { return failure(); }
                 return success();
           })
+          .Case<mlir::ONNXNoneOp>(
+            [&](auto op) { return success(); })
           // Func ops.
           .Case<func::CallOp, func::FuncOp, func::ReturnOp>(
               [&](auto op) { return printOperation(*this, op); })
