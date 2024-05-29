@@ -502,7 +502,6 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) 
   llvm::APFloat alpha = leakyReluOp.getAlpha();
   auto tTypeX = x.getType().dyn_cast_or_null<TensorType>();
   auto tTypeY = y.getType().dyn_cast_or_null<TensorType>();
-  ONNXConstantOp constOp;
 
   if ((!tTypeX) || (!tTypeY)) {
     return leakyReluOp.emitOpError("operand not valid tensor type!");
@@ -903,6 +902,87 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp
   return success();
 }
 
+int pplResizeTranformMode(StringRef mode) {
+  if (mode == "half_pixel") {
+    return 0;
+  } else if (mode == "half_pixel_symmetric") {
+    return -1; //not supported
+  } else if (mode == "pytorch_half_pixel") {
+    return 1;
+  } else if (mode == "align_corners") {
+    return 2;
+  } else if (mode == "asymmetric") {
+    return 3;
+  } else if (mode == "tf_crop_and_resize") {
+    return 5;
+  }
+  return -1;
+}
+
+int pplResizeInterMode(StringRef mode) {
+  if (mode == "nearest") {
+    return 0;
+  } else if (mode == "linear") {
+    return 1;
+  } else if (mode == "cubic") {
+    return 2;
+  }
+  return -1;
+}
+
+int pplResizeNearestMode(StringRef mode) {
+  //deps/ppl.kernel.cuda/src/nn/resize.cu::PPLCUDAResizeForwardImp : nearest_mode not used...
+  if (mode == "round_prefer_floor") {
+    
+  } else if (mode == "round_prefer_ceil") {
+
+  }  else if (mode == "floor") {
+
+  }  else if (mode == "ceil") {
+
+  }
+  return -1;
+}
+
+
+/// only support scales, roi&sizes not suppoerted yet.
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value res = resizeOp.getResult();
+  Value input = resizeOp.getX();
+  Value scales = resizeOp.getScales();
+  int transformMode = pplResizeTranformMode(resizeOp.getCoordinateTransformationMode());
+  int interMode = pplResizeInterMode(resizeOp.getMode());
+  int nearestMode = pplResizeNearestMode(resizeOp.getNearestMode());
+
+  if (resizeOp.getScales().getDefiningOp()->getName().getStringRef() != "onnx.Constant") {
+    return resizeOp.emitError("dynamic resize scale not supported!");
+  }
+  if (transformMode < 0) {
+    return resizeOp.emitError("transform mode not supported!");
+  }
+  if (interMode < 0) {
+    return resizeOp.emitError("invalid inter mode!");
+  }
+
+  os << "ppl::common::RetCode PPLCUDAResizeForwardImp(";          //ppl::common::RetCode PPLCUDAResizeForwardImp(
+  os << emitter.getStreamName(res) << ", ";                       //  cudaStream_t stream,
+  os << emitter.getPPLShapeName(input) << ", ";                   //  const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(input) << ", ";                   //  const void* input,
+  os << emitter.getPPLShapeName(res) << ", ";                     //  const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(input) << ", ";                   //  void* outData,
+  os << "false" << ", ";                                          //  bool scale_pre_set,
+  os << emitter.getOrCreateName(scales) << "Constant" << "[2], "; //  float h_scale,
+  os << emitter.getOrCreateName(scales) << "Constant" << "[3], "; //  float w_scale,
+  os << transformMode << ", ";                                    //  int transform_mode,
+  os << interMode << ", ";                                        //  int inter_mode,
+  os << resizeOp.getCubicCoeffA().convertToFloat() << ", ";       //  float cubic_coeff,
+  os << nearestMode << ", ";                                      //  int nearest_mode,
+  os << 1.f << ", ";                                              //  float in_scale,
+  os << 1.f << ");\n";                                              //  float out_scale);
+  return success();
+}
+
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   Operation *operation = callOp.getOperation();
   StringRef callee = callOp.getCallee();
@@ -1107,6 +1187,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
   if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
   if (hasPplOp("onnx.Reshape")) { emitter.emitInclude(prefix.str().append("memory/reshape.h"), isLocal);}
+  if (hasPplOp("onnx.ResizeV13")) { emitter.emitInclude(prefix.str().append("nn/resize.h"), isLocal);}
   os << "\n";
 }
 
@@ -1257,7 +1338,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           .Case<mlir::ONNXAbsOp,
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
-                mlir::ONNXPowOp, mlir::ONNXReshapeOp
+                mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
