@@ -1063,7 +1063,11 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXTransposeOp transpo
   os << "&" << emitter.getPPLShapeName(Y) << ", ";  //    const ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(Y) << ");\n";       //    void* output);
 
+  return success();
+}
 
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
+  //TODO: implement conv!!!
   return success();
 }
 
@@ -1434,7 +1438,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
                 mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
-                mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op, mlir::ONNXTransposeOp
+                mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op, mlir::ONNXTransposeOp,
+                mlir::ONNXConvOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
