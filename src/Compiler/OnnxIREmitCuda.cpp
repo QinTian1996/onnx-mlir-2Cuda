@@ -50,6 +50,8 @@ using llvm::formatv;
 #define INFO(info)
 #endif /* ENABLE_INFO_QT */
 
+bool enableStreamAndEvent = false;
+
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
 /// on each element doesn't return a string.
@@ -1402,7 +1404,9 @@ LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
 }
 
 std::string CudaEmitter::getStreamName(Value value) {
-  return  getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Stream";
+  return  enableStreamAndEvent ?
+      getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Stream"
+    : "0";
 }
 
 std::string CudaEmitter::getEventName(Value value) {
@@ -1426,19 +1430,21 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
     }
 
     //Name stream and event after res[0]. Declare and init stream and event for every ONNX op.
-    INFO("create stream and event, naming after result[0].")
-    Value res0 = op.getResult(0);
-    os << "cudaStream_t " << getStreamName(res0) << ";\n";
-    os << "cudaStreamCreate(&" << getStreamName(res0) << ");\n";
-    os << "cudaEvent_t " << getEventName(res0) << ";\n";
-    os << "cudaEventCreate(&" << getEventName(res0) << ");\n";
-    pushCudaEvent(res0);
+    if (enableStreamAndEvent) {
+      INFO("create stream and event, naming after result[0].")
+      Value res0 = op.getResult(0);
+      os << "cudaStream_t " << getStreamName(res0) << ";\n";
+      os << "cudaStreamCreate(&" << getStreamName(res0) << ");\n";
+      os << "cudaEvent_t " << getEventName(res0) << ";\n";
+      os << "cudaEventCreate(&" << getEventName(res0) << ");\n";
+      pushCudaEvent(res0);
 
-    INFO("Wait for events for every operand.")
-    if (op.getNumOperands()) {
-      for (auto operand : op.getOperands()) {
-        if (NULL == operand.getDefiningOp()) { continue; }
-        os << "cudaStreamWaitEvent(" << getStreamName(res0) << ", " << getEventName(operand) << ", 0);\n"; 
+      INFO("Wait for events for every operand.")
+      if (op.getNumOperands()) {
+        for (auto operand : op.getOperands()) {
+          if (NULL == operand.getDefiningOp()) { continue; }
+          os << "cudaStreamWaitEvent(" << getStreamName(res0) << ", " << getEventName(operand) << ", 0);\n"; 
+        }
       }
     }
   }
@@ -1448,21 +1454,22 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
 
 LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
   INFO("Post proccess")
-  INFO("1. emit event record")
-  os << "cudaEventRecord(" << getEventName(op.getResult(0)) << ", " << getStreamName(op.getResult(0)) << ");\n";
-
+  if (enableStreamAndEvent) {
+    INFO("1. emit event record")
+    os << "cudaEventRecord(" << getEventName(op.getResult(0)) << ", " << getStreamName(op.getResult(0)) << ");\n";
+  }
   INFO("2. destroy first use operand`s stream (func args do not have definingOp and do not need streamdestroy)")
   INFO("3. free last use for every operands")
   if (op.getNumOperands()) {
     for (auto operand : op.getOperands()) {
-      if (operand.getDefiningOp() && getValueFirstUse(operand) == (&op)) {
+      if (enableStreamAndEvent && operand.getDefiningOp() && getValueFirstUse(operand) == (&op)) {
         os << "cudaStreamDestroy(" << getStreamName(operand) << ");\n";
       }
       if (getValueLastUse(operand) == (&op)) {
         if (failed(emitFree(operand))) {
           return failure();
         }
-        if (operand.getDefiningOp()) {
+        if (enableStreamAndEvent && operand.getDefiningOp()) {
           os << "cudaEventSynchronize(" << getEventName(operand) << ");\n";
           os << "cudaEventDestroy(" << getEventName(operand) <<");\n";
         }
