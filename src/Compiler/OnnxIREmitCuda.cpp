@@ -717,7 +717,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
   assert(constantOp.getValue().has_value() && "Value is not set");
 
   //FIXME: enable constant print
-  bool showConstContent = false;
+  bool showConstContent = true;
   if(!showConstContent) { return success(); }
   if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
     if (auto tType = res.getType().dyn_cast<TensorType>()) {
@@ -1076,6 +1076,75 @@ LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   StringRef callee = callOp.getCallee();
 
   return printCallOperation(emitter, operation, callee);
+}
+
+
+//returnOp in onnx is actually assigning returned value to output value correspondly.
+//eg. return %0 -> %output_0 := %0
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReturnOp returnOp) {
+    //processReturnOp(returnOp);
+    raw_indented_ostream &os = emitter.ostream();
+    func::FuncOp funcOp = dyn_cast_or_null<func::FuncOp>(returnOp->getBlock()->getParent()->getParentOp());
+    FunctionType funcType = funcOp.getFunctionType();
+    ArrayAttr resAttrs = funcOp.getResAttrsAttr();
+    auto returnOprands = returnOp.getOperands();
+ 
+    if (returnOp.getNumOperands() != funcType.getNumResults()) {
+      return returnOp.emitError("return value number does not match the function output number!");
+    }
+
+    while (emitter.hasCudaEvent()) {
+      Value value = emitter.popCudaEvent();
+      os << "cudaEventSynchronize(" << emitter.getEventName(value) << ");\n";
+      os << "cudaEventDestroy(" << emitter.getEventName(value) << ");\n";
+    }
+
+    for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
+      if (resAttrs) {
+        DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
+        if (dictAttrs && dictAttrs.contains("onnx.name")) {
+          if (auto tType = returnOprands[i].getType().dyn_cast<TensorType>()) {
+            os << "cudaMemcpy(";
+            os << "func_output_" << dictAttrs.getNamed("onnx.name")
+                            .value()
+                            .getValue()
+                            .cast<StringAttr>().strref();
+            os << ", ";
+            os << emitter.getOrCreateName(returnOprands[i]) << ", ";
+            os << tType.getNumElements();
+            os << " * sizeof(";
+            if (failed(emitter.emitType(returnOprands[i].getLoc(), tType.getElementType()))) {
+              return returnOp.emitError("emit return value type failed!");
+            } 
+            os << "), cudaMemcpyDeviceToDevice);\n";
+            Value value = returnOp.getOperand(0);
+            if(failed(emitter.emitFree(value))) {
+              return failure();
+            }
+          } else {
+            os << "func_output_" << dictAttrs.getNamed("onnx.name")
+                            .value()
+                            .getValue()
+                            .cast<StringAttr>().strref();
+            //os << " /*output[" << i << "]*/";
+            os << " = ";
+            if (!emitter.hasValueInScope(returnOprands[i])) {
+              return returnOp.emitError("return undefined value!");
+            }
+            os << emitter.getOrCreateName(returnOprands[i]);
+            os << ";\n";
+          }
+        }
+      }
+    }
+
+    //Only destroy event of SSA which are first res of its definingOp to prevent repeat destroy for multi-output op SSA.
+    while (emitter.hasCudaEvent()) {
+      os << "cudaEventDestroy(" << emitter.getEventName(emitter.popCudaEvent()) <<");\n";
+    }
+
+    os << "return;";
+    return success();
 }
 
 //returnOp in onnx is actually assigning returned value to output value correspondly.
@@ -1452,7 +1521,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           .Case<mlir::ONNXNoneOp>(
             [&](auto op) { return success(); })
           // Func ops.
-          .Case<func::CallOp, func::FuncOp, func::ReturnOp>(
+          .Case<func::CallOp, func::FuncOp, func::ReturnOp, mlir::ONNXReturnOp>(
               [&](auto op) { return printOperation(*this, op); })
           //.Case<mlir::LiteralOp>([&](auto op) { return success(); })
           // ignore entry point, we will call func somewhere else
