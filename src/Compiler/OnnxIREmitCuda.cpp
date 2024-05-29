@@ -50,7 +50,7 @@ using llvm::formatv;
 #define INFO(info)
 #endif /* ENABLE_INFO_QT */
 
-bool enableStreamAndEvent = false;
+bool enableStreamAndEvent = true;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -674,16 +674,18 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   INFO("collect input_dims and input_padded_dims, since ONNX.concat does not have pad attr, these 2 same.")
   INFO("need to convert int64 * dims to int32 *")
 
+  std::string pplInputDimsName = emitter.getOrCreateName(res).str() + "pplInputDims";
+
   // collect shapes
   os << "pplInputShapes.clear();\n";
   for (auto i : operands) {
     os << "pplInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
   }
 
-  os << "pplInputDims = createPPLDims(pplInputShapes);\n";
+  os << "int **" << pplInputDimsName << " = createPPLDims(pplInputShapes);\n";
 
   INFO("collect inputs.");
-  os << "void *" << emitter.getOrCreateName(res) << "ONNXConcatOpInputs[] = {";
+  os << "const void *" << emitter.getOrCreateName(res) << "ONNXConcatOpInputs[] = {";
   for (auto i : operands) {
     os << emitter.getOrCreateName(i) << ", ";
   }
@@ -697,17 +699,16 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   os << stream                                                    << ", ";  //      cudaStream_t stream,
   os << axis                                                      << ", ";  //      int axis,
   os << numInput                                                  << ", ";  //      int num_inputs,
-  os << "pplInputDims"                                            << ", ";  //      int* input_dims[],
-  os << "pplInputDims"                                            << ", ";  //      int* input_padded_dims[],
+  os << pplInputDimsName                                          << ", ";  //      int* input_dims[],
+  os << pplInputDimsName                                          << ", ";  //      int* input_padded_dims[],
   os << emitter.getOrCreateName(res) << "ONNXConcatOpInputs"      << ", ";  //      const void* inputs[],
   os <<  "&" << emitter.getPPLShapeName(res)                      << ", ";  //      ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(res)                              << ", ";  //      void* output,
   os << "0"                                                       << ");";  //      int mask = 0);
   os << "\n";
 
-  os << "destroyPPLDims(" << "pplInputDims";
+  os << "destroyPPLDims(" << pplInputDimsName;
   os << ", pplInputShapes.size());\n";
-  os << "pplInputDims = NULL;\n";
   os << "pplInputShapes.clear();\n";
 
   return success();
@@ -1019,6 +1020,7 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
   Value input = splitOp.getInput();
 
   os << "pplInputShapes.clear();\n";
+  std::string pplSplitOutDimsName = emitter.getOrCreateName(results[0]).str() + "pplSplitOutDims";
 
 
   for (auto i : splitOp.getResults()) {
@@ -1026,7 +1028,7 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
     os << "pplInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
   }
 
-  os << "pplSplitOutDims = createPPLDimsI64(pplInputShapes);\n";
+  os << "const int64_t **" <<pplSplitOutDimsName << "= createPPLDimsI64(pplInputShapes);\n";
   os << "void *" << emitter.getOrCreateName(results[0]) << "SplitOutputs[] = {";
   for (auto i : results) {
     os << emitter.getOrCreateName(i) << ", ";
@@ -1039,10 +1041,10 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
   os << "&" << emitter.getPPLShapeName(input) << ", ";                           //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                           //  const void* input,
   os << splitOp.getNumResults() << ", ";                                  //  int num_outputs,
-  os << "pplSplitOutDims" << ", ";                                           //  const int64_t* out_dims[],
+  os << pplSplitOutDimsName << ", ";                                           //  const int64_t* out_dims[],
   os << emitter.getOrCreateName(results[0]) << "SplitOutputs" << ");\n";  //  void* output[]);
 
-  os << "destroyPPLDimsI64(pplSplitOutDims, pplInputShapes.size());\n";
+  os << "destroyPPLDimsI64(" << pplSplitOutDimsName << ", pplInputShapes.size());\n";
   return success();
 }
 
@@ -1267,17 +1269,11 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   os.indent();
   os << "\n";
 
-  INFO("add some fixed code")
-  os << "int threads_per_block = 512;//fixed block setting for now\n";
-  os << "\n";
-
   INFO("prepare some re-use var for ops")
   if (emitter.hasPplOp("onnx.Concat") ||
       emitter.hasPplOp("onnx.SplitV13")
   ) {
     os << "std::vector<ppl::common::TensorShape> pplInputShapes;\n";
-    os << "int **pplInputDims;\n";
-    os << "int64_t **pplSplitOutDims;\n";
   }
 
   if (emitter.hasPplOp("onnx.Transpose")) {
