@@ -636,7 +636,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXMaxPoolSingleOutOp maxPoo
   int padH    = maxPoolSingleOutOp.getPads().has_value() ? maxPoolSingleOutOp.getPads().value()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
   int padW    = maxPoolSingleOutOp.getPads().has_value() ? maxPoolSingleOutOp.getPads().value()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
   
-  os << "ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(";  //ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(
+  os << "PPLCUDAMaxPoolingForwardImp(";  //ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(
   os << emitter.getStreamName(res) << ", ";                   //  cudaStream_t stream,
   os << "&" << emitter.getPPLShapeName(inp) << ", ";          //  ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(inp) << ", ";                 //  const void* input,
@@ -681,16 +681,16 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   auto axis = concatOp.getAxis();
   auto numInput = concatOp.getNumOperands();
 
-  os << "PPLCUDAConcatForwardImp(";                                       //  ppl::common::RetCode PPLCUDAConcatForwardImp(
-  os << stream                                                    << ", ";//      cudaStream_t stream,
-  os << axis                                                      << ", ";//      int axis,
-  os << numInput                                                  << ", ";//      int num_inputs,
-  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";//      int* input_dims[],
-  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";//      int* input_padded_dims[],
-  os << emitter.getOrCreateName(res) << "ONNXConcatOpInputs"      << ", ";//      const void* inputs[],
-  os << emitter.getPPLShapeName(res)                              << ", ";//      ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(res)                              << ", ";//      void* output,
-  os << "0"                                                       << ");";//      int mask = 0);
+  os << "PPLCUDAConcatForwardImp(";                                         //  ppl::common::RetCode PPLCUDAConcatForwardImp(
+  os << stream                                                    << ", ";  //      cudaStream_t stream,
+  os << axis                                                      << ", ";  //      int axis,
+  os << numInput                                                  << ", ";  //      int num_inputs,
+  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";  //      int* input_dims[],
+  os << emitter.getOrCreateName(res) << "PPLConcatInputDims"      << ", ";  //      int* input_padded_dims[],
+  os << emitter.getOrCreateName(res) << "ONNXConcatOpInputs"      << ", ";  //      const void* inputs[],
+  os << emitter.getPPLShapeName(res)                              << ", ";  //      ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(res)                              << ", ";  //      void* output,
+  os << "0"                                                       << ");";  //      int mask = 0);
   os << "\n";
 
   os << "destroyPPLDims(" << emitter.getOrCreateName(res) << "PPLConcatInputDims";
@@ -891,12 +891,12 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp
   }
   os << ");\n";
 
-  os << "ppl::common::RetCode PPLCUDAReshapeForwardImp("; //ppl::common::RetCode PPLCUDAReshapeForwardImp(
-  os << emitter.getStreamName(res) << ", "; //  cudaStream_t stream,
-  os << "&" << emitter.getPPLShapeName(input) << ", "; //  const ppl::common::TensorShape* input_shape,
-  os << emitter.getOrCreateName(input) << ", "; //  const void* input,
-  os << "&" << shapeName << ", "; //  const ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(res) << ");\n"; //  void* output);
+  os << "PPLCUDAReshapeForwardImp(";                    //ppl::common::RetCode PPLCUDAReshapeForwardImp(
+  os << emitter.getStreamName(res) << ", ";             //  cudaStream_t stream,
+  os << "&" << emitter.getPPLShapeName(input) << ", ";  //  const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(input) << ", ";         //  const void* input,
+  os << "&" << shapeName << ", ";                       //  const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(res) << ");\n";         //  void* output);
 
   os << "free(" << shapeHostName << ");\n";
   return success();
@@ -965,7 +965,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
     return resizeOp.emitError("invalid inter mode!");
   }
 
-  os << "ppl::common::RetCode PPLCUDAResizeForwardImp(";          //ppl::common::RetCode PPLCUDAResizeForwardImp(
+  os << "PPLCUDAResizeForwardImp(";          //ppl::common::RetCode PPLCUDAResizeForwardImp(
   os << emitter.getStreamName(res) << ", ";                       //  cudaStream_t stream,
   os << emitter.getPPLShapeName(input) << ", ";                   //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  const void* input,
@@ -979,7 +979,23 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
   os << resizeOp.getCubicCoeffA().convertToFloat() << ", ";       //  float cubic_coeff,
   os << nearestMode << ", ";                                      //  int nearest_mode,
   os << 1.f << ", ";                                              //  float in_scale,
-  os << 1.f << ");\n";                                              //  float out_scale);
+  os << 1.f << ");\n";                                            //  float out_scale);
+  return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXSigmoidOp sigmoidOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value res = sigmoidOp.getY();
+  Value input = sigmoidOp.getX();
+
+  os << "PPLCUDAUnarySigmoidForwardImp("; //ppl::common::RetCode PPLCUDAUnarySigmoidForwardImp(
+  os << emitter.getStreamName(res)                    << ", "; //  cudaStream_t stream,
+  os << emitter.getPPLShapeName(input)                << ", "; //  const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(input)                << ", "; //  const void* input,
+  os << emitter.getPPLShapeName(res)                  << ", "; //  const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(input)                << ", "; //  void* output,
+  os << ");\n";                                                //  const QuantKernelParamCuda* qparam = nullptr);
+
   return success();
 }
 
@@ -1183,7 +1199,9 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
       hasPplOp("onnx.Div") ||
       hasPplOp("onnx.Pow")
     ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), isLocal); }
-  if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), isLocal); }
+  if (hasPplOp("onnx.Abs") ||
+      hasPplOp("onnx.Sigmoid")
+    ) { emitter.emitInclude(prefix.str().append("unary/unary.h"), isLocal); }
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
   if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
   if (hasPplOp("onnx.Reshape")) { emitter.emitInclude(prefix.str().append("memory/reshape.h"), isLocal);}
@@ -1338,7 +1356,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           .Case<mlir::ONNXAbsOp,
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
-                mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op
+                mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
+                mlir::ONNXSigmoidOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
