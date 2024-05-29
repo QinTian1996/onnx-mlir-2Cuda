@@ -268,10 +268,10 @@ public:
   std::string getPPLShapeName(Value &value) {
     return getOrCreateName(value).str() + "Shape";
   };
+  LogicalResult emitPPLType(Type type);
 
 private:
   std::string pplCommonPrefix = "ppl::common::";
-  LogicalResult emitPPLType(Type type);
 
 };
 
@@ -832,6 +832,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
 
   if (size) {
     os << "cudaMemcpyAsync(";
+    os << emitter.getStreamName(res) << ", "; // stream
     os << emitter.getOrCreateName(res) << ", "; //dst
     os << emitter.getOrCreateName(res) << "Constant" << ", "; //src
     os << size << ", ";
@@ -842,7 +843,65 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
   return success();
 }
 
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value input = reshapeOp.getOperand(0);
+  Value shape = reshapeOp.getOperand(1);
+  Value res   = reshapeOp.getResult();
+  TensorType tType = shape.getType().dyn_cast<TensorType>();
+  if (!tType) {
+    return reshapeOp.emitError("target shape is not tensor!");
+  }
 
+  std::string shapeHostName = emitter.getOrCreateName(shape).str() + "HostCopyFor" + emitter.getOrCreateName(res).str();
+  if (failed(emitter.emitType(shape.getLoc(), shape.getType()))) {
+    return failure();
+  }
+  os << shapeHostName << "=(";
+  if (failed(emitter.emitType(shape.getLoc(), shape.getType()))) {
+    return failure();
+  }
+  os << ")malloc(" << tType.getNumElements();
+  os << " * sizeof(";
+  if (failed(emitter.emitType(shape.getLoc(), tType.getElementType()))) {
+    return failure();
+  }
+  os << "));\n";
+
+  os << "cudaMemcpyAsync(";
+  os << emitter.getStreamName(res) << ", ";
+  os << shapeHostName << ", ";
+  os << emitter.getOrCreateName(shape) << ", ";
+  os << tType.getNumElements();
+  os << " * sizeof(";
+  if (failed(emitter.emitType(shape.getLoc(), tType.getElementType()))) {
+    return failure();
+  }
+  os << "), cudaMemcpyDeviceToHost);\n";
+
+
+  std::string shapeName =  emitter.getOrCreateName(shape).str() + "ValueToShapeFor" + emitter.getOrCreateName(res).str();
+  os << "ppl::common::TensorShape " << shapeName << ";\n";
+  os << shapeName << ".SetDimCount(" << tType.getDimSize(0) << ");\n";
+  for (auto i = 0; i < tType.getDimSize(0); i++) {
+    os << shapeName << ".SetDim(" << i << ", " << shapeHostName << "[" << i << "]" << ");\n";
+  }
+  os << shapeName << ".SetDataType(";
+  if (failed(emitter.emitPPLType(tType.getElementType()))) {
+    return emitError(shape.getLoc(), "fail to emit pplType!");
+  }
+  os << ");\n";
+
+  os << "ppl::common::RetCode PPLCUDAReshapeForwardImp("; //ppl::common::RetCode PPLCUDAReshapeForwardImp(
+  os << emitter.getStreamName(res) << ", "; //  cudaStream_t stream,
+  os << "&" << emitter.getPPLShapeName(input) << ", "; //  const ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(input) << ", "; //  const void* input,
+  os << "&" << shapeName << ", "; //  const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(res) << ");\n"; //  void* output);
+
+  os << "free(" << shapeHostName << ");\n";
+  return success();
+}
 
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   Operation *operation = callOp.getOperation();
@@ -875,7 +934,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
       if (resAttrs) {
         DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
         if (dictAttrs && dictAttrs.contains("onnx.name")) {
-          //cudaMemcpy
           if (auto tType = returnOprands[i].getType().dyn_cast<TensorType>()) {
             os << "cudaMemcpy(";
             os << "func_output_" << dictAttrs.getNamed("onnx.name")
@@ -1048,6 +1106,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), isLocal); }
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
   if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
+  if (hasPplOp("onnx.Reshape")) { emitter.emitInclude(prefix.str().append("memory/reshape.h"), isLocal);}
   os << "\n";
 }
 
@@ -1198,7 +1257,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           .Case<mlir::ONNXAbsOp,
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
-                mlir::ONNXPowOp
+                mlir::ONNXPowOp, mlir::ONNXReshapeOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
