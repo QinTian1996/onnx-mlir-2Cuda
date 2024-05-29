@@ -586,6 +586,36 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXDivOp divOp) {
   return printONNXArithmeticPPLCudaKernel<ONNXDivOp>(emitter, divOp);
 }
 
+LogicalResult printOperation(CudaEmitter &emitter, ONNXMaxPoolSingleOutOp maxPoolSingleOutOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value res = maxPoolSingleOutOp.getResult();
+  Value inp = maxPoolSingleOutOp.getOperand();
+
+  int kernelH = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+  int kernelW = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+  int strideH = maxPoolSingleOutOp.getStrides().has_value() ? maxPoolSingleOutOp.getStrides().value()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;
+  int strideW = maxPoolSingleOutOp.getStrides().has_value() ? maxPoolSingleOutOp.getStrides().value()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;;
+  int padH    = maxPoolSingleOutOp.getPads().has_value() ? maxPoolSingleOutOp.getPads().value()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
+  int padW    = maxPoolSingleOutOp.getPads().has_value() ? maxPoolSingleOutOp.getPads().value()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
+  
+  os << "ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(";  //ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(
+  os << emitter.getStreamName(res) << ", ";                   //  cudaStream_t stream,
+  os << "&" << emitter.getPPLShapeName(inp) << ", ";          //  ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(inp) << ", ";                 //  const void* input,
+  os << "&" << emitter.getPPLShapeName(res) << ", ";          //  ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(res) << ", ";                 //  void* output,
+  os << kernelH << ", ";                                      //  int kernel_height,
+  os << kernelW << ", ";                                      //  int kernel_width,
+  os << strideH << ", ";                                      //  int stride_height,
+  os << strideW << ", ";                                      //  int stride_width,
+  os << padH << ", ";                                         //  int padding_height,
+  os << padW << ", ";                                         //  int padding_width,
+  os << 1.0f << ", ";                                         //  float in_scale,
+  os << 1.0f << ");\n";                                       //  float out_scale);
+
+  return success();
+}
+
 LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   raw_indented_ostream &os = emitter.ostream();
   Value res = concatOp.getResult();
@@ -642,6 +672,10 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     return constantOp.emitError("Only support dense values at this time");
   }
   assert(constantOp.getValue().has_value() && "Value is not set");
+
+  //FIXME:
+  bool showConstContent = false;
+  if(!showConstContent) { return success(); }
   if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
     if (auto tType = res.getType().dyn_cast<TensorType>()) {
       auto eType = tType.getElementType();
@@ -653,29 +687,35 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
         auto t =  tensorAttr.getArray<float_16>();
         auto t1 = t.get();
         for(auto i : t1) { os << i.toFloat() << ", "; }
+        size = t1.size() * sizeof(float_16);
       }
       else if (eType.isa<Float32Type>()) {
         auto t =  tensorAttr.getArray<float>();
         auto t1 = t.get();
         for(auto i : t1) { os << i << ", "; }
+        size = t1.size() * sizeof(float);
       } else if (eType.isa<IntegerType>()) {
         auto iType = eType.dyn_cast<IntegerType>();
         if (iType.getWidth() == 64) {
           auto t =  tensorAttr.getArray<int64_t>();
           auto t1 = t.get();
           for(auto i : t1) { os << i << ", "; }
+          size = t1.size() * sizeof(int64_t);
         } else if (iType.getWidth() == 32) {
           auto t =  tensorAttr.getArray<int32_t>();
           auto t1 = t.get();
           for(auto i : t1) { os << i << ", "; }
+          size = t1.size() * sizeof(int);
         } else if (iType.getWidth() == 16) {
           auto t =  tensorAttr.getArray<int16_t>();
           auto t1 = t.get();
           for(auto i : t1) { os << i << ", "; }
+          size = t1.size() * sizeof(int16_t);
         } else if (iType.getWidth() == 8) {
           auto t =  tensorAttr.getArray<int8_t>();
           auto t1 = t.get();
           for(auto i : t1) { os << (int)i << ", "; }
+          size = t1.size() * sizeof(int8_t);
         } else {
           os << "WTF: ??? " << res.getLoc() << "\n"; 
         }
@@ -685,11 +725,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
       
       os << "};\n";
     }
-
-    return success();
-  }
-
-  if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DenseElementsAttr>()) {
+  } else if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DenseElementsAttr>()) {
     if (TensorType tType = type.dyn_cast<TensorType>()) {
       Type eType = tType.getElementType();
       if (auto intDenseAttr = tensorAttr.dyn_cast_or_null<DenseIntElementsAttr>()) {
@@ -971,6 +1007,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
     ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), isLocal); }
   if (hasPplOp("onnx.Abs")) { emitter.emitInclude(prefix.str().append("abs.h"), isLocal); }
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
+  if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
   os << "\n";
 }
 
@@ -1120,7 +1157,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           // ONNX ops.
           .Case<mlir::ONNXAbsOp,
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
-                mlir::ONNXConcatOp, mlir::ONNXConstantOp
+                mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
