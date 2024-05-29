@@ -41,8 +41,14 @@
 using namespace mlir;
 using llvm::formatv;
 
-#define INFO(info) os << "//INFO: " << info << "\n";
 
+#define ENABLE_INFO_QT 0
+
+#if ENABLE_INFO_QT
+#define INFO(info) os << "//INFO: " << info << "\n";
+#else
+#define INFO(info)
+#endif /* ENABLE_INFO_QT */
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -325,7 +331,7 @@ LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
     }
   }
   if (auto nType = dyn_cast<NoneType>(type)) {
-    os << "int";
+    os << "[[maybe_unused]] int ";
     return success();
   }
   if (auto iType = dyn_cast<IndexType>(type))
@@ -672,7 +678,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
     os << "pplInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
   }
 
-  os <<  "int **" << emitter.getOrCreateName(res) << "pplInputDims = createPPLDims(pplInputShapes);\n";
+  os << "pplInputDims = createPPLDims(pplInputShapes);\n";
 
   INFO("collect inputs.");
   os << "void *" << emitter.getOrCreateName(res) << "ONNXConcatOpInputs[] = {";
@@ -689,15 +695,15 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   os << stream                                                    << ", ";  //      cudaStream_t stream,
   os << axis                                                      << ", ";  //      int axis,
   os << numInput                                                  << ", ";  //      int num_inputs,
-  os << emitter.getOrCreateName(res) << "pplInputDims"            << ", ";  //      int* input_dims[],
-  os << emitter.getOrCreateName(res) << "pplInputDims"            << ", ";  //      int* input_padded_dims[],
+  os << "pplInputDims"                                            << ", ";  //      int* input_dims[],
+  os << "pplInputDims"                                            << ", ";  //      int* input_padded_dims[],
   os << emitter.getOrCreateName(res) << "ONNXConcatOpInputs"      << ", ";  //      const void* inputs[],
-  os << emitter.getPPLShapeName(res)                              << ", ";  //      ppl::common::TensorShape* output_shape,
+  os <<  "&" << emitter.getPPLShapeName(res)                      << ", ";  //      ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(res)                              << ", ";  //      void* output,
   os << "0"                                                       << ");";  //      int mask = 0);
   os << "\n";
 
-  os << "destroyPPLDims(" << emitter.getOrCreateName(res) << "pplInputDims";
+  os << "destroyPPLDims(" << "pplInputDims";
   os << ", pplInputShapes.size());\n";
   os << "pplInputDims = NULL;\n";
   os << "pplInputShapes.clear();\n";
@@ -725,7 +731,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
       if (failed(emitter.emitType(res.getLoc(), eType))) {
         return failure();
       }
-      os << " " << emitter.getOrCreateName(res) << "constant[] = {";
+      os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
       if (eType.isa<Float16Type>()) {
         auto t =  tensorAttr.getArray<float_16>();
         auto t1 = t.get();
@@ -836,7 +842,6 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
 
   if (size) {
     os << "cudaMemcpyAsync(";
-    os << emitter.getStreamName(res) << ", "; // stream
     os << emitter.getOrCreateName(res) << ", "; //dst
     os << emitter.getOrCreateName(res) << "Constant" << ", "; //src
     os << size << ", ";
@@ -873,7 +878,6 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp
   os << "));\n";
 
   os << "cudaMemcpyAsync(";
-  os << emitter.getStreamName(res) << ", ";
   os << shapeHostName << ", ";
   os << emitter.getOrCreateName(shape) << ", ";
   os << tType.getNumElements();
@@ -881,7 +885,10 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp
   if (failed(emitter.emitType(shape.getLoc(), tType.getElementType()))) {
     return failure();
   }
-  os << "), cudaMemcpyDeviceToHost);\n";
+  os << "), ";
+  os << "cudaMemcpyDeviceToHost, ";
+  os << emitter.getStreamName(res);
+  os << ");\n";
 
 
   std::string shapeName =  emitter.getOrCreateName(shape).str() + "ValueToShapeFor" + emitter.getOrCreateName(res).str();
@@ -972,9 +979,9 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
 
   os << "PPLCUDAResizeForwardImp(";          //ppl::common::RetCode PPLCUDAResizeForwardImp(
   os << emitter.getStreamName(res) << ", ";                       //  cudaStream_t stream,
-  os << emitter.getPPLShapeName(input) << ", ";                   //  const ppl::common::TensorShape* input_shape,
+  os <<  "&" << emitter.getPPLShapeName(input) << ", ";                   //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  const void* input,
-  os << emitter.getPPLShapeName(res) << ", ";                     //  const ppl::common::TensorShape* output_shape,
+  os <<  "&" << emitter.getPPLShapeName(res) << ", ";                     //  const ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  void* outData,
   os << "false" << ", ";                                          //  bool scale_pre_set,
   os << emitter.getOrCreateName(scales) << "Constant" << "[2], "; //  float h_scale,
@@ -995,10 +1002,10 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXSigmoidOp sigmoidOp
 
   os << "PPLCUDAUnarySigmoidForwardImp("; //ppl::common::RetCode PPLCUDAUnarySigmoidForwardImp(
   os << emitter.getStreamName(res)                    << ", "; //  cudaStream_t stream,
-  os << emitter.getPPLShapeName(input)                << ", "; //  const ppl::common::TensorShape* input_shape,
+  os << "&" << emitter.getPPLShapeName(input)         << ", "; //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input)                << ", "; //  const void* input,
-  os << emitter.getPPLShapeName(res)                  << ", "; //  const ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(input)                << ", "; //  void* output,
+  os << "&" << emitter.getPPLShapeName(res)           << ", "; //  const ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(input)                       ; //  void* output,
   os << ");\n";                                                //  const QuantKernelParamCuda* qparam = nullptr);
 
   return success();
@@ -1017,7 +1024,7 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
     os << "pplInputShapes.push_back(" << emitter.getPPLShapeName(i) << ");\n";
   }
 
-  os << "pplInputDims = createPPLDims(pplInputShapes);\n";
+  os << "pplSplitOutDims = createPPLDimsI64(pplInputShapes);\n";
   os << "void *" << emitter.getOrCreateName(results[0]) << "SplitOutputs[] = {";
   for (auto i : results) {
     os << emitter.getOrCreateName(i) << ", ";
@@ -1030,10 +1037,10 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
   os << "&" << emitter.getPPLShapeName(input) << ", ";                           //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                           //  const void* input,
   os << splitOp.getNumResults() << ", ";                                  //  int num_outputs,
-  os << "pplInputDims" << ", ";                                           //  const int64_t* out_dims[],
+  os << "pplSplitOutDims" << ", ";                                           //  const int64_t* out_dims[],
   os << emitter.getOrCreateName(results[0]) << "SplitOutputs" << ");\n";  //  void* output[]);
 
-  os << "destroyPPLDims(pplInputDims, pplInputShapes.size());\n";
+  os << "destroyPPLDimsI64(pplSplitOutDims, pplInputShapes.size());\n";
   return success();
 }
 
@@ -1093,12 +1100,6 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReturnOp returnOp) 
       return returnOp.emitError("return value number does not match the function output number!");
     }
 
-    while (emitter.hasCudaEvent()) {
-      Value value = emitter.popCudaEvent();
-      os << "cudaEventSynchronize(" << emitter.getEventName(value) << ");\n";
-      os << "cudaEventDestroy(" << emitter.getEventName(value) << ");\n";
-    }
-
     for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
       if (resAttrs) {
         DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
@@ -1136,11 +1137,6 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReturnOp returnOp) 
           }
         }
       }
-    }
-
-    //Only destroy event of SSA which are first res of its definingOp to prevent repeat destroy for multi-output op SSA.
-    while (emitter.hasCudaEvent()) {
-      os << "cudaEventDestroy(" << emitter.getEventName(emitter.popCudaEvent()) <<");\n";
     }
 
     os << "return;";
@@ -1161,12 +1157,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
       return returnOp.emitError("return value number does not match the function output number!");
     }
 
-    while (emitter.hasCudaEvent()) {
-      Value value = emitter.popCudaEvent();
-      os << "cudaEventSynchronize(" << emitter.getEventName(value) << ");\n";
-      os << "cudaEventDestroy(" << emitter.getEventName(value) << ");\n";
-    }
-
     for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
       if (resAttrs) {
         DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
@@ -1204,11 +1194,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
           }
         }
       }
-    }
-
-    //Only destroy event of SSA which are first res of its definingOp to prevent repeat destroy for multi-output op SSA.
-    while (emitter.hasCudaEvent()) {
-      os << "cudaEventDestroy(" << emitter.getEventName(emitter.popCudaEvent()) <<");\n";
     }
 
     os << "return;";
@@ -1290,6 +1275,7 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   ) {
     os << "std::vector<ppl::common::TensorShape> pplInputShapes;\n";
     os << "int **pplInputDims;\n";
+    os << "int64_t **pplSplitOutDims;\n";
   }
 
   if (emitter.hasPplOp("onnx.Transpose")) {
@@ -1380,6 +1366,27 @@ void printHelperFunction(CudaEmitter &emitter) {
   os << "  }\n";
   os << "  free(ptr);\n";
   os << "}\n\n\n";
+
+  os << "__host__ int64_t **createPPLDimsI64(std::vector<ppl::common::TensorShape> &shapes) {";
+  os << "  int64_t **res = (int64_t **)malloc(sizeof(*res) * shapes.size());";
+  os << "  for (auto i = 0; i < shapes.size(); i++) {";
+  os << "    int64_t *dims = (int64_t *)malloc(sizeof(*dims) *shapes.size());";
+  os << "    const int64_t *shapeDims = shapes[i].GetDims();";
+  os << "    for (auto j = 0; j < shapes[i].GetDimCount(); j++) {";
+  os << "      dims[j] = (int64_t)shapeDims[j];";
+  os << "    }";
+  os << "    res[i] = dims;";
+  os << "  }";
+  os << "";
+  os << "  return res;";
+  os << "}";
+
+  os << "__host__ void destroyPPLDimsI64(int64_t **ptr, int numShape) {";
+  os << "  for (auto i = 0; i < numShape; i++) {";
+  os << "    free(ptr[i]);";
+  os << "  }";
+  os << "  free(ptr);";
+  os << "}";
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
@@ -1455,6 +1462,10 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
         if (failed(emitFree(operand))) {
           return failure();
         }
+        if (operand.getDefiningOp()) {
+          os << "cudaEventSynchronize(" << getEventName(operand) << ");\n";
+          os << "cudaEventDestroy(" << getEventName(operand) <<");\n";
+        }
       }
     }
   }
@@ -1519,7 +1530,12 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 return success();
           })
           .Case<mlir::ONNXNoneOp>(
-            [&](auto op) { return success(); })
+            [&](auto op) {
+              Operation *opop = op.getOperation();
+              if (failed(emitONNXPreOp(*opop)))         { return failure(); }
+              if (failed(emitONNXPostOp(*opop)))        { return failure(); }
+              return success(); 
+          })
           // Func ops.
           .Case<func::CallOp, func::FuncOp, func::ReturnOp, mlir::ONNXReturnOp>(
               [&](auto op) { return printOperation(*this, op); })
