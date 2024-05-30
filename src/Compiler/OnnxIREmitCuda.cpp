@@ -31,6 +31,7 @@
 #include <utility>
 #include <stack>
 #include <set>
+#include <map>
 #include "../Dialect/Mlir/DialectBuilder.hpp"
 #include <llvm/IR/DerivedTypes.h>
 
@@ -50,7 +51,7 @@ using llvm::formatv;
 #define INFO(info)
 #endif /* ENABLE_INFO_QT */
 
-bool enableStreamAndEvent = false;
+bool enableStreamAndEvent = true;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -230,11 +231,38 @@ struct CudaEmitter {
 
   std::string getStreamName(Value value);
   std::string getEventName(Value value);
+  std::string getConstantName(Value value);
 
   //Push/Pop cudaEvent record.
-  void pushCudaEvent(Value value) { eventRecord.push(value); };
-  Value popCudaEvent(void) { Value v = eventRecord.top(); eventRecord.pop(); return v; };
-  bool hasCudaEvent(void) { return !eventRecord.empty(); };
+  void insertCudaEvent(Value value, int count) {
+    eventRecord[getOrCreateName(value).str()] = count;
+  };
+  int  numRefCudaEvent(Value value) {
+    if ( eventRecord.find(getOrCreateName(value).str()) != eventRecord.end()) {
+      return eventRecord[getOrCreateName(value).str()];
+    }
+    return 0;
+  };
+  void dropCudaEvent(Value value) {
+    Value v0 = value.getDefiningOp()->getResult(0);
+    if(numRefCudaEvent(v0)) {
+      (*eventRecord.find(getOrCreateName(v0).str())).second--;
+    }
+    else { return; }
+    if(0 == eventRecord[getOrCreateName(v0).str()]) { eventRecord.erase(getOrCreateName(v0).str()); }
+  };
+  std::string popCudaEvent() {
+    if (!eventRecord.empty()) {
+      std::string res = (*eventRecord.begin()).first;
+      eventRecord.erase(res);
+      return res;
+    } else {
+      return NULL;
+    }
+  }
+  bool hasCudaEvent(void) {
+    return !eventRecord.empty();
+  };
 
 private:
   using ValueMapper = llvm::ScopedHashTable<Value, std::string>;
@@ -261,7 +289,7 @@ private:
   std::stack<int64_t> labelInScopeCount;
 
   /// Record all events
-  std::stack<Value> eventRecord;
+  std::map<std::string, int> eventRecord;
 
   /// Collect all onnx op using ppl.cv to print include lines
   /// eg. mlir::ONNXAbsOp -> #include <ppl/cv/cuda/Abs.h>
@@ -721,27 +749,39 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
   size_t size = 0;
   Type type = res.getType();
 
+  std::string constName = emitter.getConstantName(res);
+
   if (constantOp.getSparseValue().has_value()) {
     return constantOp.emitError("Only support dense values at this time");
   }
   assert(constantOp.getValue().has_value() && "Value is not set");
 
-  //FIXME: enable constant print
-  bool showConstContent = false;
+  if (auto tType = dyn_cast_if_present<TensorType>(type)) {
+    os << "extern const ";
+    if (failed(emitter.emitType(res.getLoc(), tType.getElementType()))) {
+      return failure();
+    }
+    os << " " << emitter.getConstantName(res) << "[];\n";
+    size = tType.getNumElements() * tType.getElementTypeBitWidth() / 8;
+  }
+
+#if 0 /* keep for simple constant type handling */
+  bool showConstContent = true;
   if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
     if (auto tType = res.getType().dyn_cast<TensorType>()) {
       auto eType = tType.getElementType();
+      os << "extern const ";
       if (failed(emitter.emitType(res.getLoc(), eType))) {
         return failure();
       }
-      os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
-      if (eType.isa<Float16Type>()) {
+      os << " " << constName << "[];{"; // FIXME: os << " = {" 
+      if (1) { size = 16; } // FIXME:" 
+      else if (eType.isa<Float16Type>()) {
         auto t =  tensorAttr.getArray<float_16>();
         auto t1 = t.get();
         for(auto i : t1) { os << i.toFloat() << ", "; if(!showConstContent) { break; }}
         size = t1.size() * sizeof(float_16);
-      }
-      else if (eType.isa<Float32Type>()) {
+      } else if (eType.isa<Float32Type>()) {
         auto t =  tensorAttr.getArray<float>();
         auto t1 = t.get();
         for(auto i : t1) { os << i << ", "; if(!showConstContent) { break; }}
@@ -783,11 +823,12 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
       if (auto intDenseAttr = tensorAttr.dyn_cast_or_null<DenseIntElementsAttr>()) {
         if (auto iType = eType.dyn_cast<IntegerType>()) {
           auto valueRange = intDenseAttr.getValues<IntegerAttr>();
+          os << "static const ";
 
           if (failed(emitter.emitType(res.getLoc(), iType))) {
             return constantOp.emitError("emit dense ints const value failed!");
           }
-          os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
+          os << " " << constName << "[] = {";
           for (auto i : valueRange) {
             os << *i.getValue().getRawData() << ", ";if(!showConstContent) { break; }
           }
@@ -797,10 +838,11 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
       } else if (auto floatDenseAttr = tensorAttr.dyn_cast_or_null<DenseFPElementsAttr>()) {
         auto valueRange = floatDenseAttr.getValues<FloatAttr>();
         if (auto fType = eType.dyn_cast<FloatType>()) {
+          os << "static const ";
           if (failed(emitter.emitType(res.getLoc(), fType))) {
             return constantOp.emitError("emit dense ints const value failed!");
           }
-          os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
+          os << " " << constName << "[] = {";
           for (auto i : valueRange) {
             os << i.getValue().convertToFloat() << ", ";if(!showConstContent) { break; }
           }
@@ -814,7 +856,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     os << emitter.getOrCreateName(res) << " = " << f << ";\n";
   } else if (constantOp.getValueFloats().has_value()) {
     auto fs = constantOp.getValueFloats().value();
-    os << "float " << emitter.getOrCreateName(res) << "Constant[] = {";
+    os << "static const float " << constName << "[] = {";
     for (auto i : fs.getValue()) {
       os << i.cast<FloatAttr>().getValue().convertToFloat() << ", ";if(!showConstContent) { break; }
     }
@@ -825,14 +867,14 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     os << emitter.getOrCreateName(res) << " = " << i << ";\n";
   } else if (constantOp.getValueInts().has_value()) {
     auto fs = constantOp.getValueInts().value().getValue();
-    os << "int " << emitter.getOrCreateName(res) << "Constant[] = {";
+    os << "static const int " << constName << "[] = {";
     for (auto i : fs) {
       os << i.dyn_cast<IntegerAttr>().getValue() << ", ";if(!showConstContent) { break; }
     }
     os << "};\n";
     size = sizeof(int) * fs.size();
   } else if (constantOp.getValueString().has_value()) {
-    os << "char *" << emitter.getOrCreateName(res) << "Constant[] = \"";
+    os << "char *" << constName << "[] = \"";
     os <<  constantOp.getValueString().value() << "\"\n";
     size = constantOp.getValueString().value().size();
   } else if (constantOp.getValueStrings().has_value()) {
@@ -842,11 +884,12 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     //llvm::errs() << "type : " << constantOp.getValueAttr() << "\n";
     return constantOp.emitError("string list and other constant type not supported yet!");
   }
+#endif /* 0 */
 
   if (size) {
     os << "cudaMemcpyAsync(";
     os << emitter.getOrCreateName(res) << ", "; //dst
-    os << emitter.getOrCreateName(res) << "Constant" << ", "; //src
+    os << constName << ", "; //src
     os << size << ", ";
     os << "cudaMemcpyHostToDevice, ";
     os << emitter.getStreamName(res) << ");\n";
@@ -987,8 +1030,8 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
   os <<  "&" << emitter.getPPLShapeName(res) << ", ";                     //  const ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  void* outData,
   os << "false" << ", ";                                          //  bool scale_pre_set,
-  os << emitter.getOrCreateName(scales) << "Constant" << "[2], "; //  float h_scale,
-  os << emitter.getOrCreateName(scales) << "Constant" << "[3], "; //  float w_scale,
+  os << emitter.getConstantName(scales) << "[2], "; //  float h_scale,
+  os << emitter.getConstantName(scales) << "[3], "; //  float w_scale,
   os << transformMode << ", ";                                    //  int transform_mode,
   os << interMode << ", ";                                        //  int inter_mode,
   os << resizeOp.getCubicCoeffA().convertToFloat() << ", ";       //  float cubic_coeff,
@@ -1104,6 +1147,12 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReturnOp returnOp) 
       return returnOp.emitError("return value number does not match the function output number!");
     }
 
+    while (emitter.hasCudaEvent()) {
+        auto eventName = emitter.popCudaEvent();
+        os << "cudaEventSynchronize(" << eventName << "Event);\n";
+        os << "cudaEventDestroy(" << eventName <<"Event);\n";
+    }
+
     for (unsigned int i = 0; i < funcType.getNumResults(); i++) {
       if (resAttrs) {
         DictionaryAttr dictAttrs = llvm::dyn_cast<DictionaryAttr>(resAttrs[i]);
@@ -1205,7 +1254,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
-  CudaEmitter::Scope scope(emitter);
   raw_indented_ostream &os = emitter.ostream();
   FunctionType funcType = funcOp.getFunctionType();
   auto outputs = funcType.getResults();
@@ -1306,6 +1354,84 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   return success();
 }
 
+LogicalResult printConstantAsm(CudaEmitter &emitter, mlir::ONNXConstantOp constOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  Value res = constOp.getResult();
+  std::string constName = emitter.getConstantName(res);
+
+  os << "\"" << emitter.getConstantName(constOp.getResult()) << ":\\n\"\n";
+
+  assert(constOp.getValue().has_value() && "Value is not set");
+
+  bool showConstContent = true;
+  if (auto tensorAttr = constOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
+    if (auto tType = res.getType().dyn_cast<TensorType>()) {
+      auto eType = tType.getElementType();
+      if (eType.isa<Float16Type>()) {
+        os << "\".short ";
+        auto t =  tensorAttr.getArray<float_16>().get();
+        for(auto i : t) { os << "0X"; os.write_hex(i.bitcastToUInt()) << ", "; if(!showConstContent) { break; }}
+      } else if (eType.isa<Float32Type>()) {
+        os << "\".float ";
+        auto t =  tensorAttr.getArray<float>().get();
+        for(auto i : t) { os << "0f" << i << ", "; if(!showConstContent) { break; }}
+      } else if (eType.isa<IntegerType>()) {
+        auto iType = eType.dyn_cast<IntegerType>();
+        if (iType.getWidth() == 64) {
+          os << "\".quad ";
+          auto t =  tensorAttr.getArray<int64_t>().get();
+          for(auto i : t) { os << i << ", "; if(!showConstContent) { break; }}
+        } else if (iType.getWidth() == 32) {
+          os << "\".word ";
+          auto t =  tensorAttr.getArray<int32_t>().get();
+          for(auto i : t) { os << i << ", "; if(!showConstContent) { break; }}
+        } else if (iType.getWidth() == 16) {
+          auto t =  tensorAttr.getArray<int16_t>();
+          auto t1 = t.get();
+          for(auto i : t1) { os << i << ", "; if(!showConstContent) { break; }}
+        } else if (iType.getWidth() == 8) {
+          auto t =  tensorAttr.getArray<int8_t>();
+          auto t1 = t.get();
+          for(auto i : t1) { os << (int)i << ", "; if(!showConstContent) { break; }}
+        } else {
+          os << "WTF: ??? " << res.getLoc() << "\n"; 
+        }
+      } else {
+        os << "WTF: ??? " << res.getLoc() << "\n";
+      }
+      os << "0";
+      os << "\\n\"\n";
+    }
+  }
+
+  return success();
+}
+
+LogicalResult printConstantAsm(CudaEmitter &emitter, ModuleOp moduleOp) {
+  raw_indented_ostream &os = emitter.ostream();
+
+  os << "asm (\n";
+  os << "\".section .czw_onnx_const, \\\"a\\\"\\n\"\n";
+  os << "\".align 8\\n\"\n";
+
+  //traverse all graph for constant
+  for (Operation &op : moduleOp) {
+    if (auto func = dyn_cast_if_present<func::FuncOp>(op)) {
+      func.walk([&](Operation *op){
+        if (auto constOp = dyn_cast_if_present<mlir::ONNXConstantOp>(op)) {
+          if (failed(printConstantAsm(emitter, constOp))) {
+
+          }
+        }
+      });
+    }
+  }
+
+  os << "\".text\\n\"\n";
+  os << ");\n";
+  return success();
+}
+
 void CudaEmitter::collectPplInc(CudaEmitter &emitter, ModuleOp moduleOp) {
   moduleOp->walk([&](Operation *op){
     if (op->getDialect()->getNamespace() == "onnx") {
@@ -1384,7 +1510,7 @@ void printHelperFunction(CudaEmitter &emitter) {
   os << "    free((void *)ptr[i]);\n";
   os << "  }\n";
   os << "  free(ptr);\n";
-  os << "}\n";
+  os << "}\n\n\n";
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
@@ -1392,6 +1518,10 @@ LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
   emitter.collectPplInc(emitter, moduleOp);
   emitter.printPplInc(emitter);
   printHelperFunction(emitter);
+
+  if (failed(printConstantAsm(emitter, moduleOp))) {
+    return failure();
+  }
   for (Operation &op : moduleOp) {
     if (failed(emitter.emitOperation(op, /*trailingSemicolon=*/false)))
       return failure();
@@ -1408,6 +1538,17 @@ std::string CudaEmitter::getStreamName(Value value) {
 std::string CudaEmitter::getEventName(Value value) {
   assert(value.getDefiningOp());
   return getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Event";
+}
+
+std::string CudaEmitter::getConstantName(Value value) {
+  assert(value.getDefiningOp());
+  assert(isa<mlir::ONNXConstantOp>(value.getDefiningOp()));
+  auto fop = value.getDefiningOp();
+  while (fop && !isa<func::FuncOp>(fop)) {
+    fop = fop->getParentOp();
+  }
+
+  return (fop ? dyn_cast_if_present<func::FuncOp>(fop).getName().str() : "NOFUNC") + "_" + getOrCreateName(value).str() + "Constant";
 }
 
 LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
@@ -1433,7 +1574,7 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
       os << "cudaStreamCreate(&" << getStreamName(res0) << ");\n";
       os << "cudaEvent_t " << getEventName(res0) << ";\n";
       os << "cudaEventCreate(&" << getEventName(res0) << ");\n";
-      pushCudaEvent(res0);
+      insertCudaEvent(res0, op.getNumResults());
 
       INFO("Wait for events for every operand.")
       if (op.getNumOperands()) {
@@ -1466,8 +1607,11 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
           return failure();
         }
         if (enableStreamAndEvent && operand.getDefiningOp()) {
-          os << "cudaEventSynchronize(" << getEventName(operand) << ");\n";
-          os << "cudaEventDestroy(" << getEventName(operand) <<");\n";
+          if (numRefCudaEvent(operand) == 1) {
+            os << "cudaEventSynchronize(" << getEventName(operand) << ");\n";
+            os << "cudaEventDestroy(" << getEventName(operand) <<");\n";
+          }
+          dropCudaEvent(operand);
         }
       }
     }
@@ -1565,6 +1709,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
 LogicalResult translateToCuda(Operation *op, raw_ostream &os,
                                     bool declareVariablesAtTop) {
   CudaEmitter emitter(os, declareVariablesAtTop);
+  CudaEmitter::Scope scope(emitter);
   return emitter.emitOperation(*op, /*trailingSemicolon=*/false);
 }
 
