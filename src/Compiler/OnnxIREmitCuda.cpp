@@ -50,7 +50,7 @@ using llvm::formatv;
 #define INFO(info)
 #endif /* ENABLE_INFO_QT */
 
-bool enableStreamAndEvent = true;
+bool enableStreamAndEvent = false;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -499,6 +499,7 @@ static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
 void printFixedCode(CudaEmitter &emitter) {
   raw_indented_ostream &os = emitter.ostream();
   os << "#include <cuda_runtime.h>\n";
+  os << "#include <cstdlib>\n";
   return;
 }
 
@@ -726,8 +727,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
   assert(constantOp.getValue().has_value() && "Value is not set");
 
   //FIXME: enable constant print
-  bool showConstContent = true;
-  if(!showConstContent) { return success(); }
+  bool showConstContent = false;
   if (auto tensorAttr = constantOp.getValueAttr().dyn_cast<DisposableElementsAttr>()) {
     if (auto tType = res.getType().dyn_cast<TensorType>()) {
       auto eType = tType.getElementType();
@@ -738,35 +738,35 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
       if (eType.isa<Float16Type>()) {
         auto t =  tensorAttr.getArray<float_16>();
         auto t1 = t.get();
-        for(auto i : t1) { os << i.toFloat() << ", "; }
+        for(auto i : t1) { os << i.toFloat() << ", "; if(!showConstContent) { break; }}
         size = t1.size() * sizeof(float_16);
       }
       else if (eType.isa<Float32Type>()) {
         auto t =  tensorAttr.getArray<float>();
         auto t1 = t.get();
-        for(auto i : t1) { os << i << ", "; }
+        for(auto i : t1) { os << i << ", "; if(!showConstContent) { break; }}
         size = t1.size() * sizeof(float);
       } else if (eType.isa<IntegerType>()) {
         auto iType = eType.dyn_cast<IntegerType>();
         if (iType.getWidth() == 64) {
           auto t =  tensorAttr.getArray<int64_t>();
           auto t1 = t.get();
-          for(auto i : t1) { os << i << ", "; }
+          for(auto i : t1) { os << i << ", "; if(!showConstContent) { break; }}
           size = t1.size() * sizeof(int64_t);
         } else if (iType.getWidth() == 32) {
           auto t =  tensorAttr.getArray<int32_t>();
           auto t1 = t.get();
-          for(auto i : t1) { os << i << ", "; }
+          for(auto i : t1) { os << i << ", "; if(!showConstContent) { break; }}
           size = t1.size() * sizeof(int);
         } else if (iType.getWidth() == 16) {
           auto t =  tensorAttr.getArray<int16_t>();
           auto t1 = t.get();
-          for(auto i : t1) { os << i << ", "; }
+          for(auto i : t1) { os << i << ", "; if(!showConstContent) { break; }}
           size = t1.size() * sizeof(int16_t);
         } else if (iType.getWidth() == 8) {
           auto t =  tensorAttr.getArray<int8_t>();
           auto t1 = t.get();
-          for(auto i : t1) { os << (int)i << ", "; }
+          for(auto i : t1) { os << (int)i << ", "; if(!showConstContent) { break; }}
           size = t1.size() * sizeof(int8_t);
         } else {
           os << "WTF: ??? " << res.getLoc() << "\n"; 
@@ -789,7 +789,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
           }
           os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
           for (auto i : valueRange) {
-            os << *i.getValue().getRawData() << ", ";
+            os << *i.getValue().getRawData() << ", ";if(!showConstContent) { break; }
           }
           os <<"};\n";
           size = valueRange.size() * iType.getWidth() / 8;
@@ -802,7 +802,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
           }
           os << " " << emitter.getOrCreateName(res) << "Constant[] = {";
           for (auto i : valueRange) {
-            os << i.getValue().convertToFloat() << ", ";
+            os << i.getValue().convertToFloat() << ", ";if(!showConstContent) { break; }
           }
           os <<"};\n";
           size = valueRange.size() * fType.getWidth() / 8;
@@ -816,7 +816,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     auto fs = constantOp.getValueFloats().value();
     os << "float " << emitter.getOrCreateName(res) << "Constant[] = {";
     for (auto i : fs.getValue()) {
-      os << i.cast<FloatAttr>().getValue().convertToFloat() << ", ";
+      os << i.cast<FloatAttr>().getValue().convertToFloat() << ", ";if(!showConstContent) { break; }
     }
     os << "};\n";
     size = sizeof(float) * fs.size();
@@ -827,7 +827,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     auto fs = constantOp.getValueInts().value().getValue();
     os << "int " << emitter.getOrCreateName(res) << "Constant[] = {";
     for (auto i : fs) {
-      os << i.dyn_cast<IntegerAttr>().getValue() << ", ";
+      os << i.dyn_cast<IntegerAttr>().getValue() << ", ";if(!showConstContent) { break; }
     }
     os << "};\n";
     size = sizeof(int) * fs.size();
@@ -1020,7 +1020,7 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
   Value input = splitOp.getInput();
 
   os << "pplInputShapes.clear();\n";
-  std::string pplSplitOutDimsName = emitter.getOrCreateName(results[0]).str() + "pplSplitOutDims";
+  std::string pplSplitOutDimsName = emitter.getOrCreateName(splitOp.getResults()[0]).str() + "pplSplitOutDims";
 
 
   for (auto i : splitOp.getResults()) {
@@ -1365,26 +1365,26 @@ void printHelperFunction(CudaEmitter &emitter) {
   os << "  free(ptr);\n";
   os << "}\n\n\n";
 
-  os << "__host__ int64_t **createPPLDimsI64(std::vector<ppl::common::TensorShape> &shapes) {";
-  os << "  int64_t **res = (int64_t **)malloc(sizeof(*res) * shapes.size());";
-  os << "  for (auto i = 0; i < shapes.size(); i++) {";
-  os << "    int64_t *dims = (int64_t *)malloc(sizeof(*dims) *shapes.size());";
-  os << "    const int64_t *shapeDims = shapes[i].GetDims();";
-  os << "    for (auto j = 0; j < shapes[i].GetDimCount(); j++) {";
-  os << "      dims[j] = (int64_t)shapeDims[j];";
-  os << "    }";
-  os << "    res[i] = dims;";
-  os << "  }";
-  os << "";
-  os << "  return res;";
-  os << "}";
+  os << "__host__ const int64_t **createPPLDimsI64(std::vector<ppl::common::TensorShape> &shapes) {\n";
+  os << "  const int64_t **res = (const int64_t **)malloc(sizeof(*res) * shapes.size());\n";
+  os << "  for (auto i = 0; i < shapes.size(); i++) {\n";
+  os << "    int64_t *dims = (int64_t *)malloc(sizeof(*dims) *shapes.size());\n";
+  os << "    const int64_t *shapeDims = shapes[i].GetDims();\n";
+  os << "    for (auto j = 0; j < shapes[i].GetDimCount(); j++) {\n";
+  os << "      dims[j] = (int64_t)shapeDims[j];\n";
+  os << "    }\n";
+  os << "    res[i] = dims;\n";
+  os << "  }\n";
+  os << "\n";
+  os << "  return res;\n";
+  os << "}\n";
 
-  os << "__host__ void destroyPPLDimsI64(int64_t **ptr, int numShape) {";
-  os << "  for (auto i = 0; i < numShape; i++) {";
-  os << "    free(ptr[i]);";
-  os << "  }";
-  os << "  free(ptr);";
-  os << "}";
+  os << "__host__ void destroyPPLDimsI64(const int64_t **ptr, int numShape) {\n";
+  os << "  for (auto i = 0; i < numShape; i++) {\n";
+  os << "    free((void *)ptr[i]);\n";
+  os << "  }\n";
+  os << "  free(ptr);\n";
+  os << "}\n";
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
