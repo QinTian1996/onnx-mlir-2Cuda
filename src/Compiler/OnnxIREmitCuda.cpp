@@ -51,7 +51,9 @@ using llvm::formatv;
 #define INFO(info)
 #endif /* ENABLE_INFO_QT */
 
+/// Options
 bool enableStreamAndEvent = true;
+bool useCustomPPL = false;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -670,27 +672,40 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXMaxPoolSingleOutOp maxPoo
   Value res = maxPoolSingleOutOp.getResult();
   Value inp = maxPoolSingleOutOp.getOperand();
 
-  int kernelH = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
-  int kernelW = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
-  int strideH = maxPoolSingleOutOp.getStrides().has_value() ? maxPoolSingleOutOp.getStrides().value()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;
-  int strideW = maxPoolSingleOutOp.getStrides().has_value() ? maxPoolSingleOutOp.getStrides().value()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;;
-  int padH    = maxPoolSingleOutOp.getPads().has_value() ? maxPoolSingleOutOp.getPads().value()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
-  int padW    = maxPoolSingleOutOp.getPads().has_value() ? maxPoolSingleOutOp.getPads().value()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
-  
+  size_t dims = useCustomPPL ? 3 : 2;
+  int kernel[dims];
+  int stride[dims];
+  int pad[dims];
+
+  for (size_t i = 0; i < dims; i++ ) {
+    kernel[i] = maxPoolSingleOutOp.getKernelShape().size() > i ? maxPoolSingleOutOp.getKernelShape()[i].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;
+    stride[i] = maxPoolSingleOutOp.getStrides().has_value() && maxPoolSingleOutOp.getStrides().value().size() > i ?
+      maxPoolSingleOutOp.getStrides().value()[i].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;
+    pad[i]    = maxPoolSingleOutOp.getPads().has_value()  &&  maxPoolSingleOutOp.getStrides().value().size() > i ?
+      maxPoolSingleOutOp.getPads().value()[i].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
+  }
+
   os << "PPLCUDAMaxPoolingForwardImp(";  //ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(
-  os << emitter.getStreamName(res) << ", ";                   //  cudaStream_t stream,
-  os << "&" << emitter.getPPLShapeName(inp) << ", ";          //  ppl::common::TensorShape* input_shape,
-  os << emitter.getOrCreateName(inp) << ", ";                 //  const void* input,
-  os << "&" << emitter.getPPLShapeName(res) << ", ";          //  ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(res) << ", ";                 //  void* output,
-  os << kernelH << ", ";                                      //  int kernel_height,
-  os << kernelW << ", ";                                      //  int kernel_width,
-  os << strideH << ", ";                                      //  int stride_height,
-  os << strideW << ", ";                                      //  int stride_width,
-  os << padH << ", ";                                         //  int padding_height,
-  os << padW << ", ";                                         //  int padding_width,
-  os << 1.0f << ", ";                                         //  float in_scale,
-  os << 1.0f << ");\n";                                       //  float out_scale);
+  os << emitter.getStreamName(res) << ", ";          //  cudaStream_t stream,
+  os << "&" << emitter.getPPLShapeName(inp) << ", "; //  ppl::common::TensorShape* input_shape,
+  os << emitter.getOrCreateName(inp) << ", ";        //  const void* input,
+  os << "&" << emitter.getPPLShapeName(res) << ", "; //  ppl::common::TensorShape* output_shape,
+  os << emitter.getOrCreateName(res) << ", ";        //  void* output,
+  os << kernel[0] << ", ";                           //  int kernel,
+  os << kernel[1] << ", ";                           //  int kernel,
+  if (useCustomPPL) 
+    os << kernel[2] << ", ";                         //  int kernel,
+  os << stride[0] << ", ";                           //  int stride,
+  os << stride[1] << ", ";                           //  int stride,
+  if (useCustomPPL) 
+    os << stride[2] << ", ";                         //  int stride,
+  os << pad[0] << ", ";                              //  int padding,
+  os << pad[1] << ", ";                              //  int padding,
+  if (useCustomPPL) 
+    os << pad[2] << ", ";                            //  int padding,
+
+  os << 1.0f << ", ";                                //  float in_scale,
+  os << 1.0f << ");\n";                              //  float out_scale);
 
   return success();
 }
@@ -1009,6 +1024,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
   Value res = resizeOp.getResult();
   Value input = resizeOp.getX();
   Value scales = resizeOp.getScales();
+  Value roi = resizeOp.getRoi();
   int transformMode = pplResizeTranformMode(resizeOp.getCoordinateTransformationMode());
   int interMode = pplResizeInterMode(resizeOp.getMode());
   int nearestMode = pplResizeNearestMode(resizeOp.getNearestMode());
@@ -1025,19 +1041,32 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
 
   os << "PPLCUDAResizeForwardImp(";          //ppl::common::RetCode PPLCUDAResizeForwardImp(
   os << emitter.getStreamName(res) << ", ";                       //  cudaStream_t stream,
-  os <<  "&" << emitter.getPPLShapeName(input) << ", ";                   //  const ppl::common::TensorShape* input_shape,
+  os <<  "&" << emitter.getPPLShapeName(input) << ", ";           //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  const void* input,
-  os <<  "&" << emitter.getPPLShapeName(res) << ", ";                     //  const ppl::common::TensorShape* output_shape,
+  os <<  "&" << emitter.getPPLShapeName(res) << ", ";             //  const ppl::common::TensorShape* output_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  void* outData,
   os << "false" << ", ";                                          //  bool scale_pre_set,
-  os << emitter.getConstantName(scales) << "[2], "; //  float h_scale,
-  os << emitter.getConstantName(scales) << "[3], "; //  float w_scale,
+  os << emitter.getConstantName(scales) << "[2], ";               //  float h_scale,
+  os << emitter.getConstantName(scales) << "[3], ";               //  float w_scale,
+  if (useCustomPPL) {
+    if (roi.getDefiningOp()) {
+      os << emitter.getConstantName(roi) << "[0], ";              // float roi
+      os << emitter.getConstantName(roi) << "[1], ";              // float roi
+      os << emitter.getConstantName(roi) << "[2], ";              // float roi
+      os << emitter.getConstantName(roi) << "[3], ";              // float roi
+    } else {
+      os << "0.f, 0.f, 1.f, 1.f, ";
+    }
+  }
   os << transformMode << ", ";                                    //  int transform_mode,
   os << interMode << ", ";                                        //  int inter_mode,
   os << resizeOp.getCubicCoeffA().convertToFloat() << ", ";       //  float cubic_coeff,
   os << nearestMode << ", ";                                      //  int nearest_mode,
   os << 1.f << ", ";                                              //  float in_scale,
-  os << 1.f << ");\n";                                            //  float out_scale);
+  os << 1.f;                                              //  float out_scale,
+  if (useCustomPPL)                                             
+    os << ", " << resizeOp.getExtrapolationValue().convertToFloat();      //  ExtrapolationValue
+  os << ");\n";
   return success();
 }
 
