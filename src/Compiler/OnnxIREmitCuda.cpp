@@ -1358,6 +1358,7 @@ LogicalResult printConstantAsm(CudaEmitter &emitter, mlir::ONNXConstantOp constO
   raw_indented_ostream &os = emitter.ostream();
   Value res = constOp.getResult();
   std::string constName = emitter.getConstantName(res);
+  size_t lineBreaker = 0;
 
   os << "\"" << emitter.getConstantName(constOp.getResult()) << ":\\n\"\n";
 
@@ -1370,17 +1371,58 @@ LogicalResult printConstantAsm(CudaEmitter &emitter, mlir::ONNXConstantOp constO
       if (eType.isa<Float16Type>()) {
         os << "\".short ";
         auto t =  tensorAttr.getArray<float_16>().get();
-        for(auto i : t) { os << "0X"; os.write_hex(i.bitcastToUInt()) << ", "; if(!showConstContent) { break; }}
+        for (auto i : t) {
+          os << "0X";
+          os.write_hex(i.bitcastToUInt());
+          if (!(lineBreaker % 1200)) {
+            os << "\\n\"\n";
+            os << "\".short ";
+            lineBreaker = 0;
+          } else {
+            os << ", ";
+          }
+          lineBreaker++;
+          if (!showConstContent) {
+            break;
+          }
+        }
       } else if (eType.isa<Float32Type>()) {
         os << "\".float ";
         auto t =  tensorAttr.getArray<float>().get();
-        for(auto i : t) { os << "0f" << i << ", "; if(!showConstContent) { break; }}
+        for (auto i : t) {
+          os << "0f" << i;
+          if (!(lineBreaker % 600)) {
+            os << "\\n\"\n";
+            os << "\".float ";
+            lineBreaker = 0;
+          } else {
+            os << ", ";
+          }
+          lineBreaker++;
+          if (!showConstContent) {
+            break;
+          }
+        }
       } else if (eType.isa<IntegerType>()) {
         auto iType = eType.dyn_cast<IntegerType>();
         if (iType.getWidth() == 64) {
           os << "\".quad ";
           auto t =  tensorAttr.getArray<int64_t>().get();
-          for(auto i : t) { os << i << ", "; if(!showConstContent) { break; }}
+          for (auto i : t) {
+            os << "0X";
+            os.write_hex(i);
+            if (!(lineBreaker % 1200)) {
+              os << "\\n\"\n";
+              os << "\".quad ";
+              lineBreaker = 0;
+            } else {
+              os << ", ";
+            }
+            lineBreaker++;
+            if (!showConstContent) {
+              break;
+            }
+          }
         } else if (iType.getWidth() == 32) {
           os << "\".word ";
           auto t =  tensorAttr.getArray<int32_t>().get();
