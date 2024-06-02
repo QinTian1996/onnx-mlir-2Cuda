@@ -53,7 +53,7 @@ using llvm::formatv;
 
 /// Options
 bool enableStreamAndEvent = true;
-bool useCustomPPL = true;
+bool useCustomPPL = false;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -406,10 +406,11 @@ LogicalResult CudaEmitter::trackValueLifetime(func::FuncOp funcOp) {
 }
 
 Operation *CudaEmitter::getValueFirstUse(Value value) {
-  if (!valueFisrtUseTracker.count(value)) {
+  Value v = value.getDefiningOp() ? value.getDefiningOp()->getResult(0) : value; 
+  if (!valueFisrtUseTracker.count(v)) {
     return NULL;
   }
-  return valueFisrtUseTracker.lookup(value);
+  return valueFisrtUseTracker.lookup(v);
 }
 
 Operation *CudaEmitter::getValueLastUse (Value value) {
@@ -1064,7 +1065,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
   os << resizeOp.getCubicCoeffA().convertToFloat() << ", ";       //  float cubic_coeff,
   os << nearestMode << ", ";                                      //  int nearest_mode,
   os << 1.f << ", ";                                              //  float in_scale,
-  os << 1.f;                                              //  float out_scale,
+  os << 1.f;                                                      //  float out_scale,
   if (useCustomPPL)                                             
     os << ", " << resizeOp.getExtrapolationValue().convertToFloat();      //  ExtrapolationValue
   os << ");\n";
@@ -1152,29 +1153,31 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXTransposeOp transpo
 
 LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   raw_indented_ostream &os = emitter.ostream();
-  std::string staticShapeSuffix = "Static";
-  std::string dilationSuffix = "ConvDilations";
-  std::string padsSuffix = "ConvPads";
-  std::string stridesSuffix = "ConvStrides";
   Value input = convOp.getOperand(0);
   Value weight= convOp.getOperand(1);
   Value bias = convOp.getNumOperands() > 2 ? convOp.getOperand(2) : NULL;
   Value output = convOp.getResult();
+  std::string inputStaticShapeName = emitter.getOrCreateName(input).str() + emitter.getPPLShapeName(input) + "StaticInput";
+  std::string outputStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(output) + "StaticOutput";
+  std::string weightStaticShapeName = emitter.getOrCreateName(weight).str() + emitter.getPPLShapeName(weight) + "StaticWeight";
+  std::string dilationSuffix = "ConvDilations";
+  std::string padsSuffix = "ConvPads";
+  std::string stridesSuffix = "ConvStrides";
   auto dilations = convOp.getDilations().has_value() ? convOp.getDilations().value() : NULL;
   int group = (int)convOp.getGroup();
   auto pads = convOp.getPads().has_value() ? convOp.getPads().value() : NULL;
   auto strides = convOp.getStrides().has_value() ? convOp.getStrides().value() : NULL;
 
-  os << "int " << emitter.getPPLShapeName(input) << staticShapeSuffix << "[] = ";
+  os << "int " << inputStaticShapeName << "[] = ";
   printShape(emitter, input.getType().dyn_cast<TensorType>());
   os << ";\n";
 
-  os << "int " << emitter.getPPLShapeName(output) << "Static[] = ";
-  printShape(emitter, input.getType().dyn_cast<TensorType>());
+  os << "int " << outputStaticShapeName << "[] = ";
+  printShape(emitter, output.getType().dyn_cast<TensorType>());
   os << ";\n";
 
-  os << "int " << emitter.getPPLShapeName(weight) << "Static[] = ";
-  printShape(emitter, input.getType().dyn_cast<TensorType>());
+  os << "int " << weightStaticShapeName << "[] = ";
+  printShape(emitter, weight.getType().dyn_cast<TensorType>());
   os << ";\n";
 
   os << "int " << emitter.getOrCreateName(output) << dilationSuffix << "[] = {";
@@ -1213,13 +1216,13 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   // );
   os << "conv(";                                                                //conv(
   os << emitter.getOrCreateName(input) << ", ";                                 // input
-  os << emitter.getPPLShapeName(input) << staticShapeSuffix << ", ";            // input shape
+  os << inputStaticShapeName << ", ";                                           // input shape
   os << (int)input.getType().dyn_cast<TensorType>().getRank() << ", ";          // input rank
   os << emitter.getOrCreateName(output) << ", ";                                // output
-  os << emitter.getPPLShapeName(output) << staticShapeSuffix << ", ";           // output shape
+  os << outputStaticShapeName << ", ";                                          // output shape
   os << (int)output.getType().dyn_cast<TensorType>().getRank() << ", ";         // output rank
   os << emitter.getOrCreateName(weight) << ", ";                                // weight
-  os << emitter.getPPLShapeName(weight) << staticShapeSuffix << ", ";           // weight shape
+  os << weightStaticShapeName << ", ";                                          // weight shape
   os << (int)weight.getType().dyn_cast<TensorType>().getRank() << ", ";         // weight rank
   os << ((convOp.getNumOperands() > 2) ?        
       emitter.getOrCreateName(bias).str().data() : "NULL") << ", ";             // bias
@@ -1636,7 +1639,7 @@ void printHelperFunction(CudaEmitter &emitter) {
   os << "__host__ int **createPPLDims(std::vector<ppl::common::TensorShape> &shapes) {\n";
   os << "  int **res = (int **)malloc(sizeof(*res) * shapes.size());\n";
   os << "  for (auto i = 0; i < shapes.size(); i++) {\n";
-  os << "    int *dims = (int *)malloc(sizeof(*dims) *shapes.size());\n";
+  os << "    int *dims = (int *)malloc(sizeof(*dims) *shapes[i].GetDimCount());\n";
   os << "    const int64_t *shapeDims = shapes[i].GetDims();\n";
   os << "    for (auto j = 0; j < shapes[i].GetDimCount(); j++) {\n";
   os << "      dims[j] = (int32_t)shapeDims[j];\n";
@@ -1656,7 +1659,7 @@ void printHelperFunction(CudaEmitter &emitter) {
   os << "__host__ const int64_t **createPPLDimsI64(std::vector<ppl::common::TensorShape> &shapes) {\n";
   os << "  const int64_t **res = (const int64_t **)malloc(sizeof(*res) * shapes.size());\n";
   os << "  for (auto i = 0; i < shapes.size(); i++) {\n";
-  os << "    int64_t *dims = (int64_t *)malloc(sizeof(*dims) *shapes.size());\n";
+  os << "    int64_t *dims = (int64_t *)malloc(sizeof(*dims) *shapes[i].GetDimCount());\n";
   os << "    const int64_t *shapeDims = shapes[i].GetDims();\n";
   os << "    for (auto j = 0; j < shapes[i].GetDimCount(); j++) {\n";
   os << "      dims[j] = (int64_t)shapeDims[j];\n";
