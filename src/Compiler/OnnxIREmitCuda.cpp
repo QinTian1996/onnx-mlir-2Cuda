@@ -53,7 +53,7 @@ using llvm::formatv;
 
 /// Options
 bool enableStreamAndEvent = true;
-bool useCustomPPL = false;
+bool useCustomPPL = true;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -508,11 +508,11 @@ LogicalResult CudaEmitter::emitPPLShapeDeclaration(Value &value) {
 
 void printShape(CudaEmitter &emitter, TensorType tType) {
   raw_indented_ostream &os = emitter.ostream();
-  os << "TensorShape: [";
+  os << "{";
   for (auto i = 0; i < tType.getRank(); i++) {
     os << ( (i == 0)? "" : ", ") << (tType.isDynamicDim(i) ? "Dyn" : std::to_string(tType.getDimSize(i)));
   }
-  os << "]\n";
+  os << "}";
 }
 
 static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
@@ -604,9 +604,9 @@ LogicalResult printONNXArithmeticPPLCudaKernel(CudaEmitter &emitter, T arithmeti
 
   os.indent();
   os << "\n";
-  os << "//A "; printShape(emitter, tTypeA);
-  os << "//B "; printShape(emitter, tTypeB);
-  os << "//C "; printShape(emitter, tTypeC);
+  os << "//A "; printShape(emitter, tTypeA); os << ";\n";
+  os << "//B "; printShape(emitter, tTypeB); os << ";\n";
+  os << "//C "; printShape(emitter, tTypeC); os << ";\n";
   os.unindent();
 
   return success();
@@ -659,9 +659,9 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXPowOp powOp) {
 
   os.indent();
   os << "\n";
-  os << "//A "; printShape(emitter, tTypeA);
-  os << "//B "; printShape(emitter, tTypeB);
-  os << "//C "; printShape(emitter, tTypeC);
+  os << "//A "; printShape(emitter, tTypeA); os << ";\n";
+  os << "//B "; printShape(emitter, tTypeB); os << ";\n";
+  os << "//C "; printShape(emitter, tTypeC); os << ";\n"; 
   os.unindent();
 
   return success();
@@ -1049,7 +1049,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
   os << emitter.getConstantName(scales) << "[2], ";               //  float h_scale,
   os << emitter.getConstantName(scales) << "[3], ";               //  float w_scale,
   if (useCustomPPL) {
-    if (roi.getDefiningOp()) {
+    if (roi.getDefiningOp() && isa<ONNXConstantOp>(roi.getDefiningOp())) {
       os << emitter.getConstantName(roi) << "[0], ";              // float roi
       os << emitter.getConstantName(roi) << "[1], ";              // float roi
       os << emitter.getConstantName(roi) << "[2], ";              // float roi
@@ -1057,6 +1057,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
     } else {
       os << "0.f, 0.f, 1.f, 1.f, ";
     }
+    os << (int)resizeOp.getExcludeOutside() << ", ";
   }
   os << transformMode << ", ";                                    //  int transform_mode,
   os << interMode << ", ";                                        //  int inter_mode,
@@ -1149,8 +1150,98 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXTransposeOp transpo
   return success();
 }
 
+LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  std::string staticShapeSuffix = "Static";
+  std::string dilationSuffix = "ConvDilations";
+  std::string padsSuffix = "ConvPads";
+  std::string stridesSuffix = "ConvStrides";
+  Value input = convOp.getOperand(0);
+  Value weight= convOp.getOperand(1);
+  Value bias = convOp.getNumOperands() > 2 ? convOp.getOperand(2) : NULL;
+  Value output = convOp.getResult();
+  auto dilations = convOp.getDilations().has_value() ? convOp.getDilations().value() : NULL;
+  int group = (int)convOp.getGroup();
+  auto pads = convOp.getPads().has_value() ? convOp.getPads().value() : NULL;
+  auto strides = convOp.getStrides().has_value() ? convOp.getStrides().value() : NULL;
+
+  os << "int " << emitter.getPPLShapeName(input) << staticShapeSuffix << "[] = ";
+  printShape(emitter, input.getType().dyn_cast<TensorType>());
+  os << ";\n";
+
+  os << "int " << emitter.getPPLShapeName(output) << "Static[] = ";
+  printShape(emitter, input.getType().dyn_cast<TensorType>());
+  os << ";\n";
+
+  os << "int " << emitter.getPPLShapeName(weight) << "Static[] = ";
+  printShape(emitter, input.getType().dyn_cast<TensorType>());
+  os << ";\n";
+
+  os << "int " << emitter.getOrCreateName(output) << dilationSuffix << "[] = {";
+  if (convOp.getDilations().has_value()) {
+    for (auto i : dilations) {
+      os << i.dyn_cast<IntegerAttr>().getValue().getRawData()[0] << ", ";
+    }
+  }
+  os << "0};\n";
+
+  os << "int " << emitter.getOrCreateName(output) << padsSuffix << "[] = {";
+  if (convOp.getPads().has_value()) {
+    for (auto i : pads) {
+      os << i.dyn_cast<IntegerAttr>().getValue().getRawData()[0] << ", ";
+    }
+  }
+  os << "0};\n";
+
+  os << "int " << emitter.getOrCreateName(output) << stridesSuffix << "[] = {";
+  if (convOp.getStrides().has_value()) {
+    for (auto i : strides) {
+      os << i.dyn_cast<IntegerAttr>().getValue().getRawData()[0] << ", ";
+    }
+  }
+  os << "0};\n";
+
+  // int conv(
+  //     float *input, int *inputShape, int inputRank,
+  //     float *output, int *outputShape, int outputRank,
+  //     float *weight, int *weightShape, int weightRank,
+  //     float *bias, int biasSize,
+  //     int *dilations, int dilation_rank
+  //     int group, 
+  //     int *pads, int pads_rank,
+  //     int *strides, int strides_rank
+  // );
+  os << "conv(";                                                                //conv(
+  os << emitter.getOrCreateName(input) << ", ";                                 // input
+  os << emitter.getPPLShapeName(input) << staticShapeSuffix << ", ";            // input shape
+  os << (int)input.getType().dyn_cast<TensorType>().getRank() << ", ";          // input rank
+  os << emitter.getOrCreateName(output) << ", ";                                // output
+  os << emitter.getPPLShapeName(output) << staticShapeSuffix << ", ";           // output shape
+  os << (int)output.getType().dyn_cast<TensorType>().getRank() << ", ";         // output rank
+  os << emitter.getOrCreateName(weight) << ", ";                                // weight
+  os << emitter.getPPLShapeName(weight) << staticShapeSuffix << ", ";           // weight shape
+  os << (int)weight.getType().dyn_cast<TensorType>().getRank() << ", ";         // weight rank
+  os << ((convOp.getNumOperands() > 2) ?        
+      emitter.getOrCreateName(bias).str().data() : "NULL") << ", ";             // bias
+  os << ((convOp.getNumOperands() > 2) ?
+      (int)bias.getType().dyn_cast<TensorType>().getNumElements() : 0) << ", "; // bias size
+  os << emitter.getOrCreateName(output) << dilationSuffix << ", ";              // dilations
+  os << (convOp.getDilations().has_value() ? dilations.size() : 1) << ", ";     // dilation rank
+  os << group << ", ";                                                          // group
+  os << emitter.getOrCreateName(output) << padsSuffix << ", ";                  // pads
+  os << (convOp.getPads().has_value() ? pads.size() : 1) << ", ";               // pads rank
+  os << emitter.getOrCreateName(output) << stridesSuffix << ", ";               // strides
+  os << (convOp.getStrides().has_value() ? strides.size() : 1);                 // strides rank
+  os << ");\n";                                                                 //);
+  return success();
+}
+
+
 LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   //TODO: implement conv!!!
+  if (useCustomPPL) {
+    return printCustomConv(emitter, convOp);
+  }
   return success();
 }
 
@@ -1419,7 +1510,7 @@ LogicalResult printConstantAsm(CudaEmitter &emitter, mlir::ONNXConstantOp constO
         os << "\".float ";
         auto t =  tensorAttr.getArray<float>().get();
         for (auto i : t) {
-          os << "0f" << i;
+          os << i;
           if (!(lineBreaker % 600)) {
             os << "\\n\"\n";
             os << "\".float ";
