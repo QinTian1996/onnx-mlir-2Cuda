@@ -54,6 +54,7 @@ using llvm::formatv;
 /// Options
 bool enableStreamAndEvent = true;
 bool useCustomPPL = false;
+bool enableTiming = true;
 
 /// Convenience functions to produce interleaved output with functions returning
 /// a LogicalResult. This is different than those in STLExtras as functions used
@@ -531,6 +532,7 @@ void printFixedCode(CudaEmitter &emitter) {
   raw_indented_ostream &os = emitter.ostream();
   os << "#include <cuda_runtime.h>\n";
   os << "#include <cstdlib>\n";
+  os << "#include <iostream>\n";
   return;
 }
 
@@ -1157,9 +1159,9 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   Value weight= convOp.getOperand(1);
   Value bias = convOp.getNumOperands() > 2 ? convOp.getOperand(2) : NULL;
   Value output = convOp.getResult();
-  std::string inputStaticShapeName = emitter.getOrCreateName(input).str() + emitter.getPPLShapeName(input) + "StaticInput";
+  std::string inputStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(input) + "StaticInput";
   std::string outputStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(output) + "StaticOutput";
-  std::string weightStaticShapeName = emitter.getOrCreateName(weight).str() + emitter.getPPLShapeName(weight) + "StaticWeight";
+  std::string weightStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(weight) + "StaticWeight";
   std::string dilationSuffix = "ConvDilations";
   std::string padsSuffix = "ConvPads";
   std::string stridesSuffix = "ConvStrides";
@@ -1440,6 +1442,11 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   os.indent();
   os << "\n";
 
+  INFO("initialize ms for timing, if enabled")
+  if (enableTiming) {
+    os << "float ms = 0.f;\n";
+  }
+
   INFO("prepare some re-use var for ops")
   if (emitter.hasPplOp("onnx.Concat") ||
       emitter.hasPplOp("onnx.SplitV13")
@@ -1631,6 +1638,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.ResizeV13")) { emitter.emitInclude(prefix.str().append("nn/resize.h"), isLocal);}
   if (hasPplOp("onnx.SplitV13")) { emitter.emitInclude(prefix.str().append("memory/split.h"), isLocal);}
   if (hasPplOp("onnx.Transpose")) { emitter.emitInclude(prefix.str().append("memory/transpose.h"), isLocal);}
+  if (hasPplOp("onnx.Conv") && useCustomPPL) { emitter.emitInclude("conv2d.h", isLocal);}
   os << "\n";
 }
 
@@ -1748,6 +1756,12 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
           os << "cudaStreamWaitEvent(" << getStreamName(res0) << ", " << getEventName(operand) << ", 0);\n"; 
         }
       }
+
+      if (enableTiming) {
+        os << "cudaEvent_t " << getEventName(res0) << "Start;\n";
+        os << "cudaEventCreate(&" << getEventName(res0) << "Start);\n";
+        os << "cudaEventRecord(" << getEventName(res0) << "Start, " << getStreamName(res0) << ");\n";  
+      }
     }
   }
 
@@ -1774,6 +1788,12 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
         if (enableStreamAndEvent && operand.getDefiningOp()) {
           if (numRefCudaEvent(operand) == 1) {
             os << "cudaEventSynchronize(" << getEventName(operand) << ");\n";
+            if (enableTiming) {
+              os << "cudaEventElapsedTime(&ms, " << getEventName(operand) << "Start, ";
+              os << getEventName(operand) << ");\n";
+              os << "std::cout << \"" << getOrCreateName(operand) << " " << operand.getDefiningOp()->getName();
+              os << " time: \" << ms << std::endl;\n"; 
+            }
             os << "cudaEventDestroy(" << getEventName(operand) <<");\n";
           }
           dropCudaEvent(operand);
