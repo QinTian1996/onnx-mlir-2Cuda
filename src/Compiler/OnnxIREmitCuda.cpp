@@ -766,7 +766,6 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
   Value res = constantOp.getResult();
   size_t size = 0;
   Type type = res.getType();
-
   std::string constName = emitter.getConstantName(res);
 
   if (constantOp.getSparseValue().has_value()) {
@@ -905,12 +904,19 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
 #endif /* 0 */
 
   if (size) {
-    os << "cudaMemcpyAsync(";
+    if (enableStreamAndEvent) {
+      os << "cudaMemcpyAsync(";
+    } else {
+      os << "cudaMemcpy(";
+    }
     os << emitter.getOrCreateName(res) << ", "; //dst
     os << constName << ", "; //src
     os << size << ", ";
     os << "cudaMemcpyHostToDevice, ";
-    os << emitter.getStreamName(res) << ");\n";
+    if (enableStreamAndEvent) {
+      os << emitter.getStreamName(res);
+    }
+    os << ");\n";
   }
 
   return success();
@@ -1237,6 +1243,7 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   os << (convOp.getPads().has_value() ? pads.size() : 1) << ", ";               // pads rank
   os << emitter.getOrCreateName(output) << stridesSuffix << ", ";               // strides
   os << (convOp.getStrides().has_value() ? strides.size() : 1);                 // strides rank
+  os << ", " << emitter.getStreamName(output);                                  // stream
   os << ");\n";                                                                 //);
   return success();
 }
@@ -1316,7 +1323,9 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReturnOp returnOp) 
         }
       }
     }
-
+    if (enableTiming) {
+      os << "std::cout << \"total compute time: \" << ms_total << \"ms\" << std::endl;\n"; 
+    }
     os << "return;";
     return success();
 }
@@ -1445,6 +1454,7 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   INFO("initialize ms for timing, if enabled")
   if (enableTiming) {
     os << "float ms = 0.f;\n";
+    os << "float ms_total = 0.f;\n";
   }
 
   INFO("prepare some re-use var for ops")
@@ -1791,10 +1801,12 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
             if (enableTiming) {
               os << "cudaEventElapsedTime(&ms, " << getEventName(operand) << "Start, ";
               os << getEventName(operand) << ");\n";
-              os << "std::cout << \"" << getOrCreateName(operand) << " " << operand.getDefiningOp()->getName();
-              os << " time: \" << ms << std::endl;\n"; 
+              os << "std::cout << \"" << getOrCreateName(operand) << ", " << operand.getDefiningOp()->getName();
+              os << ", \" << ms << std::endl;\n"; 
             }
             os << "cudaEventDestroy(" << getEventName(operand) <<");\n";
+            if (operand.getDefiningOp()->getName().getStringRef() != "onnx.Constant")
+               os << "ms_total+=ms;\n";
           }
           dropCudaEvent(operand);
         }
