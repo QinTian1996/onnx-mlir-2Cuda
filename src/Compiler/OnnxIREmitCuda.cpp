@@ -1642,6 +1642,7 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.Abs") ||
       hasPplOp("onnx.Sigmoid")
     ) { emitter.emitInclude(prefix.str().append("unary/unary.h"), isLocal); }
+  if (hasPplOp("onnx.Custom")) { emitter.emitInclude(prefix.str().append("unary/swish.h"), isLocal); }
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
   if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
   if (hasPplOp("onnx.Reshape")) { emitter.emitInclude(prefix.str().append("memory/reshape.h"), isLocal);}
@@ -1710,6 +1711,43 @@ LogicalResult printOperation(CudaEmitter &emitter, ModuleOp moduleOp) {
       return failure();
   }
   return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, ONNXCustomOp customOp) {
+    raw_indented_ostream &os = emitter.ostream();
+
+    // Extract attributes from ONNXCustomOp
+    auto domainName = customOp->getAttrOfType<StringAttr>("domain_name").getValue();
+    auto functionName = customOp->getAttrOfType<StringAttr>("function_name").getValue();
+    auto onnxNodeName = customOp->getAttrOfType<StringAttr>("onnx_node_name").getValue();
+
+    // TODO: maybe mx has a lot self-define operation?
+    // Verify the domain name and function name to identify the CustomOp
+    if (domainName != "com.metax-tech" || functionName != "Swish") {
+        return failure(); // CustomOp doesn't match expected criteria
+    }
+
+    // Extract operands and results
+    auto operands = customOp.getOperands();
+    auto results = customOp.getResults();
+
+    // Swish has only one operand and one result, right?
+    auto inputTensor = operands[0];
+    auto outputTensor = results[0];
+
+    // Print information about the CustomOp
+    os << "PPLCUDAUnarySwishForwardImp(";                           // PPLCUDAUnarySwishForwardImp(
+    os << emitter.getStreamName(outputTensor) << ", ";              // cudaStream_t stream,
+    os << "&" << emitter.getPPLShapeName(inputTensor) << ", ";      // const ppl::common::TensorShape* input_shape,
+    os << emitter.getOrCreateName(inputTensor) << ", ";             // const void* input,
+    os << "&" << emitter.getPPLShapeName(outputTensor) << ", ";     // const ppl::common::TensorShape* output_shape,
+    os << emitter.getOrCreateName(outputTensor) << ", ";            // void* output,
+    os << "0.f, ";                                                  // float beta, actually not used
+    os << "1.f, ";                                                  // float in_scale,
+    os << "1.f";                                                    // float out_scale
+    os << ");\n";
+
+    return success();
 }
 
 std::string CudaEmitter::getStreamName(Value value) {
@@ -1863,7 +1901,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
                 mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
                 mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op, mlir::ONNXTransposeOp,
-                mlir::ONNXConvOp
+                mlir::ONNXConvOp,
+                mlir::ONNXCustomOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
