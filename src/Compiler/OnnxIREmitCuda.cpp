@@ -104,6 +104,9 @@ struct CudaEmitter {
   /// Emit ssa var declaration or return falure.
   LogicalResult emitDeclaration(Value &value);
 
+  /// Emit ssa tensor var device malloc or return falure.
+  LogicalResult emitDeviceMalloc(Value &value);
+
   /// Emit ssa var free or return falure.
   LogicalResult emitFree(Value &value);
 
@@ -169,7 +172,7 @@ struct CudaEmitter {
     }
 
   private:
-    llvm::ScopedHashTableScope<Value, std::string> valueMapperScope;
+    llvm::ScopedHashTableScope<Value, unsigned int> valueMapperScope;
     llvm::ScopedHashTableScope<Block *, std::string> blockMapperScope;
     llvm::ScopedHashTableScope<Value, Operation *> lifetimeTrackerFirstScope;
     llvm::ScopedHashTableScope<Value, Operation *> lifetimeTrackerLastScope;
@@ -177,7 +180,8 @@ struct CudaEmitter {
   };
 
   /// Return the existing or a new name for a Value.
-  StringRef getOrCreateName(Value val);
+  std::string getOrCreateName(Value val);
+  unsigned int getOrCreateIndex(Value val);
 
   /// Returns wether the Value is assigned to a variable in the scope.
   bool hasValueInScope(Value val);
@@ -238,21 +242,21 @@ struct CudaEmitter {
 
   //Push/Pop cudaEvent record.
   void insertCudaEvent(Value value, int count) {
-    eventRecord[getOrCreateName(value).str()] = count;
+    eventRecord[getOrCreateName(value)] = count;
   };
   int  numRefCudaEvent(Value value) {
-    if ( eventRecord.find(getOrCreateName(value).str()) != eventRecord.end()) {
-      return eventRecord[getOrCreateName(value).str()];
+    if ( eventRecord.find(getOrCreateName(value)) != eventRecord.end()) {
+      return eventRecord[getOrCreateName(value)];
     }
     return 0;
   };
   void dropCudaEvent(Value value) {
     Value v0 = value.getDefiningOp()->getResult(0);
     if(numRefCudaEvent(v0)) {
-      (*eventRecord.find(getOrCreateName(v0).str())).second--;
+      (*eventRecord.find(getOrCreateName(v0))).second--;
     }
     else { return; }
-    if(0 == eventRecord[getOrCreateName(v0).str()]) { eventRecord.erase(getOrCreateName(v0).str()); }
+    if(0 == eventRecord[getOrCreateName(v0)]) { eventRecord.erase(getOrCreateName(v0)); }
   };
   std::string popCudaEvent() {
     if (!eventRecord.empty()) {
@@ -268,7 +272,7 @@ struct CudaEmitter {
   };
 
 private:
-  using ValueMapper = llvm::ScopedHashTable<Value, std::string>;
+  using ValueMapper = llvm::ScopedHashTable<Value, unsigned int>;
   using BlockMapper = llvm::ScopedHashTable<Block *, std::string>;
   using LifeTimeTracker = llvm::ScopedHashTable<Value, Operation *>;
 
@@ -305,7 +309,7 @@ private:
 public:
   LogicalResult emitPPLShapeDeclaration(Value &value);
   std::string getPPLShapeName(Value &value) {
-    return getOrCreateName(value).str() + "Shape";
+    return getOrCreateName(value) + "Shape";
   };
   LogicalResult emitPPLType(Type type);
 
@@ -320,11 +324,15 @@ CudaEmitter::CudaEmitter(raw_ostream &os, bool declareVariablesAtTop)
   labelInScopeCount.push(0);
 }
 
-/// Return the existing or a new name for a Value.
-StringRef CudaEmitter::getOrCreateName(Value val) {
+unsigned int CudaEmitter::getOrCreateIndex(Value val) {
   if (!valueMapper.count(val))
-    valueMapper.insert(val, formatv("v{0}", ++valueInScopeCount.top()));
+    valueMapper.insert(val,++valueInScopeCount.top());
   return *valueMapper.begin(val);
+}
+
+/// Return the existing or a new name for a Value.
+std::string CudaEmitter::getOrCreateName(Value val) {
+  return formatv("v{0}", getOrCreateIndex(val));
 }
 
 LogicalResult CudaEmitter::emitType(::mlir::Location loc, ::mlir::Type type) {
@@ -533,6 +541,7 @@ void printFixedCode(CudaEmitter &emitter) {
   os << "#include <cuda_runtime.h>\n";
   os << "#include <cstdlib>\n";
   os << "#include <iostream>\n";
+  os << "#include <vector>\n";
   return;
 }
 
@@ -721,7 +730,7 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConcatOp concatOp) {
   INFO("collect input_dims and input_padded_dims, since ONNX.concat does not have pad attr, these 2 same.")
   INFO("need to convert int64 * dims to int32 *")
 
-  std::string pplInputDimsName = emitter.getOrCreateName(res).str() + "pplInputDims";
+  std::string pplInputDimsName = emitter.getOrCreateName(res) + "pplInputDims";
 
   // collect shapes
   os << "pplInputShapes.clear();\n";
@@ -932,7 +941,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp
     return reshapeOp.emitError("target shape is not tensor!");
   }
 
-  std::string shapeHostName = emitter.getOrCreateName(shape).str() + "HostCopyFor" + emitter.getOrCreateName(res).str();
+  std::string shapeHostName = emitter.getOrCreateName(shape) + "HostCopyFor" + emitter.getOrCreateName(res);
   if (failed(emitter.emitType(shape.getLoc(), shape.getType()))) {
     return failure();
   }
@@ -961,7 +970,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXReshapeOp reshapeOp
   os << ");\n";
 
 
-  std::string shapeName =  emitter.getOrCreateName(shape).str() + "ValueToShapeFor" + emitter.getOrCreateName(res).str();
+  std::string shapeName =  emitter.getOrCreateName(shape) + "ValueToShapeFor" + emitter.getOrCreateName(res);
   os << "ppl::common::TensorShape " << shapeName << ";\n";
   os << shapeName << ".SetDimCount(" << tType.getDimSize(0) << ");\n";
   for (auto i = 0; i < tType.getDimSize(0); i++) {
@@ -1102,7 +1111,7 @@ LogicalResult printOperation(CudaEmitter &emitter,  mlir::ONNXSplitV13Op splitOp
   Value input = splitOp.getInput();
 
   os << "pplInputShapes.clear();\n";
-  std::string pplSplitOutDimsName = emitter.getOrCreateName(splitOp.getResults()[0]).str() + "pplSplitOutDims";
+  std::string pplSplitOutDimsName = emitter.getOrCreateName(splitOp.getResults()[0]) + "pplSplitOutDims";
 
 
   for (auto i : splitOp.getResults()) {
@@ -1136,7 +1145,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXTransposeOp transpo
   Value X = transposeOp.getOperand();
   auto perm = transposeOp.getPerm();
 
-  std::string kernelParamName = emitter.getOrCreateName(Y).str() + "transposeKernelParam";
+  std::string kernelParamName = emitter.getOrCreateName(Y) + "transposeKernelParam";
   os << "TransposeKernelParam " << kernelParamName << ";\n";
   if (perm.has_value()) {
     for (auto i : perm.value()) {
@@ -1165,9 +1174,9 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   Value weight= convOp.getOperand(1);
   Value bias = convOp.getNumOperands() > 2 ? convOp.getOperand(2) : NULL;
   Value output = convOp.getResult();
-  std::string inputStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(input) + "StaticInput";
-  std::string outputStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(output) + "StaticOutput";
-  std::string weightStaticShapeName = emitter.getOrCreateName(output).str() + emitter.getPPLShapeName(weight) + "StaticWeight";
+  std::string inputStaticShapeName = emitter.getOrCreateName(output) + emitter.getPPLShapeName(input) + "StaticInput";
+  std::string outputStaticShapeName = emitter.getOrCreateName(output) + emitter.getPPLShapeName(output) + "StaticOutput";
+  std::string weightStaticShapeName = emitter.getOrCreateName(output) + emitter.getPPLShapeName(weight) + "StaticWeight";
   std::string dilationSuffix = "ConvDilations";
   std::string padsSuffix = "ConvPads";
   std::string stridesSuffix = "ConvStrides";
@@ -1233,7 +1242,7 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   os << weightStaticShapeName << ", ";                                          // weight shape
   os << (int)weight.getType().dyn_cast<TensorType>().getRank() << ", ";         // weight rank
   os << ((convOp.getNumOperands() > 2) ?        
-      emitter.getOrCreateName(bias).str().data() : "NULL") << ", ";             // bias
+      emitter.getOrCreateName(bias).data() : "NULL") << ", ";             // bias
   os << ((convOp.getNumOperands() > 2) ?
       (int)bias.getType().dyn_cast<TensorType>().getNumElements() : 0) << ", "; // bias size
   os << emitter.getOrCreateName(output) << dilationSuffix << ", ";              // dilations
@@ -1385,6 +1394,20 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
 
     os << "return;";
     return success();
+}
+
+LogicalResult printFuncGlobalResorce(CudaEmitter &emitter, func::FuncOp funcOp) {
+  return failure();
+}
+
+LogicalResult printFuncPreProcess(CudaEmitter &emitter, func::FuncOp funcOp) {
+  raw_indented_ostream &os = emitter.ostream();
+
+
+
+  os << "__host__ void " << funcOp.getName().str() << "PreProcess() {\n";
+
+  return success();
 }
 
 LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
@@ -1719,9 +1742,8 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXCustomOp customOp) {
     // Extract attributes from ONNXCustomOp
     auto domainName = customOp->getAttrOfType<StringAttr>("domain_name").getValue();
     auto functionName = customOp->getAttrOfType<StringAttr>("function_name").getValue();
-    auto onnxNodeName = customOp->getAttrOfType<StringAttr>("onnx_node_name").getValue();
 
-    // TODO: maybe mx has a lot self-define operation?
+    // TODO: maybe there are a lot self-define operations?
     // Verify the domain name and function name to identify the CustomOp
     if (domainName != "com.metax-tech" || functionName != "Swish") {
         return failure(); // CustomOp doesn't match expected criteria
@@ -1752,13 +1774,13 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXCustomOp customOp) {
 
 std::string CudaEmitter::getStreamName(Value value) {
   return  enableStreamAndEvent ?
-      getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Stream"
+      getOrCreateName(value.getDefiningOp()->getResult(0)) + "Stream"
     : "0";
 }
 
 std::string CudaEmitter::getEventName(Value value) {
   assert(value.getDefiningOp());
-  return getOrCreateName(value.getDefiningOp()->getResult(0)).str() + "Event";
+  return getOrCreateName(value.getDefiningOp()->getResult(0)) + "Event";
 }
 
 std::string CudaEmitter::getConstantName(Value value) {
@@ -1769,7 +1791,7 @@ std::string CudaEmitter::getConstantName(Value value) {
     fop = fop->getParentOp();
   }
 
-  return (fop ? dyn_cast_if_present<func::FuncOp>(fop).getName().str() : "NOFUNC") + "_" + getOrCreateName(value).str() + "Constant";
+  return (fop ? dyn_cast_if_present<func::FuncOp>(fop).getName().str() : "NOFUNC") + "_" + getOrCreateName(value) + "Constant";
 }
 
 LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
@@ -1781,6 +1803,9 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
         return op.emitOpError("unable to declare ssa var.");
       }
       if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
+        if (failed(emitDeviceMalloc(res))) {
+          return op.emitOpError("unable to malloc ssa var.");
+        }
         if(failed(emitPPLShapeDeclaration(res))) {
           return op.emitError("failed to emit ppl shape declaration!");
         }
@@ -1865,17 +1890,22 @@ LogicalResult CudaEmitter::emitDeclaration(Value &value) {
   os << getOrCreateName(value) << ";";
   os << "\n";
 
+  return success();
+}
+
+LogicalResult CudaEmitter::emitDeviceMalloc(Value &value) {
+  INFO(value.getLoc());
+
   if (auto tType = value.getType().dyn_cast<TensorType>()) {
     os << "cudaMalloc((void**)&" << getOrCreateName(value) << ", "<< tType.getNumElements();
     os << " * sizeof(";
     if (failed(emitType(value.getLoc(), tType.getElementType()))) {
       return failure();
     }
-    os << "))";
+    os << "));\n";
+    return success();
   }
-  os << ";\n";
-
-  return success();
+  return failure();
 }
 
 LogicalResult CudaEmitter::emitFree(Value &value) {
@@ -1980,42 +2010,6 @@ void registerToCudaTranslation() {
         // clang-format on
       });
 }
-
-
-/// @brief 
-/// @param input pre malloced device mem with input tensor data
-/// @param inputShape LIST OF INTS. shape of input tensor
-/// @param inputRank rank of input tensor
-/// @param output pre malloced device mem
-/// @param outputShape LIST OF INTS shape of output tensor
-/// @param outputRank rank of output tensor
-/// @param weight pre malloced device mem
-/// @param weightShape LIST OF INTS shape of  weight tensor
-/// @param weightRank rank of weight tensor
-/// @param bias list of bias tensor
-/// @param biasSize len(bias)
-/// @param autoPadType auto pad type, default 0 is NOTSET
-/// @param dilations LIST OF INTS dilation value along each spatial axis of the filter. If not present, the dilation defaults is 1 along each spatial axis.
-/// @param group (default 1)number of groups input channels and output channels are divided into
-/// @param kernel_shape LIST OF INTS. number of groups input channels and output channels are divided into
-/// @param kernel_rank rank of kernel shape
-/// @param pads  LIST OF INTS. Padding for the beginning and ending along each spatial axis, it can take any value greater than or equal to 0. 
-/// @param pads_rank rank(pads)
-/// @param strides LIST OF INTS. Stride along each spatial axis. If not present, the stride defaults is 1 along each spatial axis.
-/// @param strides_rank rank(strides)
-/// @return result code, 0 for success, error code o/w
-int conv(
-    float *input, int *inputShape, int inputRank,
-    float *output, int *outputShape, int outputRank,
-    float *weight, int *weightShape, int weightRank,
-    float *bias, int biasSize,
-    int autoPadType, 
-    int *dilations, 
-    int group, 
-    int *kernel_shape, int kernel_rank,
-    int *pads, int pads_rank,
-    int *strides, int strides_rank
-);
 
 } // namespace mlir
 
