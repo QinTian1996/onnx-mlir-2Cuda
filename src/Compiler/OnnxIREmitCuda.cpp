@@ -52,7 +52,7 @@ using llvm::formatv;
 #endif /* ENABLE_INFO_QT */
 
 /// Options
-bool enableStreamAndEvent = true;
+bool enableStreamAndEvent = false;
 bool useCustomPPL = false;
 bool enableTiming = true;
 
@@ -937,9 +937,9 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
     os << emitter.getOrCreateName(res) << ", "; //dst
     os << constName << ", "; //src
     os << size << ", ";
-    os << "cudaMemcpyHostToDevice, ";
+    os << "cudaMemcpyHostToDevice";
     if (enableStreamAndEvent) {
-      os << emitter.getStreamName(res);
+      os << ", " << emitter.getStreamName(res);
     }
     os << ");\n";
   }
@@ -1282,6 +1282,86 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   return success();
 }
 
+LogicalResult printFuncGlobalResorce(CudaEmitter &emitter, func::FuncOp funcOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  funcOp.walk([&](Operation *op){
+    //raw_indented_ostream &os = emitter.ostream();
+    //if op has result(all onnx op  has at least one output, so just a guard here)
+    if (op->getNumResults()) {
+      INFO("SSA var declaration and shape decl if SSA is TensorType")
+      for (auto res : op->getResults()) {
+        if (failed(emitter.emitDeclaration(res))) {
+          return;
+        }
+        if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
+          if(failed(emitter.emitPPLShapeDeclaration(res))) {
+            return;
+          }
+        }
+      }
+    }
+    if (mlir::ONNXConstantOp constantOp =  dyn_cast<mlir::ONNXConstantOp>(op)) {
+      auto res = constantOp.getResult();
+      os << "const extern char  " << emitter.getConstantName(res) << "[];\n";
+    }
+  });
+
+  return success();
+}
+
+LogicalResult printFuncGlobalResorceSetup(CudaEmitter &emitter, func::FuncOp funcOp) {
+  raw_indented_ostream &os = emitter.ostream();
+  os << "__host__ void " << funcOp.getName().str() << "GlobalResourceSetup(void) {";
+  os.indent();
+  os << "\n";
+
+  funcOp.walk([&](Operation *op){
+    //raw_indented_ostream &os = emitter.ostream();
+    //if op has result(all onnx op  has at least one output, so just a guard here)
+    if (op->getNumResults()) {
+      INFO("SSA var declaration and shape decl if SSA is TensorType")
+      for (auto res : op->getResults()) {
+        if (failed(emitter.emitDeviceMalloc(res))) {
+          return;
+        }
+        if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
+          if(failed(emitter.emitPPLShapeSetup(res))) {
+            return;
+          }
+        }
+      }
+      if (mlir::ONNXConstantOp constantOp =  dyn_cast<mlir::ONNXConstantOp>(op)) {
+        auto res = constantOp.getResult();
+        size_t size = 0;
+
+        if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
+          size = tType.getNumElements() * tType.getElementTypeBitWidth() / 8;
+        }
+
+        if (size) {
+          if (enableStreamAndEvent) {
+            os << "cudaMemcpyAsync(";
+          } else {
+            os << "cudaMemcpy(";
+          }
+          os << emitter.getOrCreateName(res) << ", "; //dst
+          os << emitter.getConstantName(res) << ", "; //src
+          os << size << ", ";
+          os << "cudaMemcpyHostToDevice";
+          if (enableStreamAndEvent) {
+            os << ", " << emitter.getStreamName(res);
+          }
+          os << ");\n";
+        }
+      }
+    }
+  });
+  os.unindent();
+  os << "\n}\n\n";
+  return success();
+}
+
+
 LogicalResult printOperation(CudaEmitter &emitter, func::CallOp callOp) {
   Operation *operation = callOp.getOperation();
   StringRef callee = callOp.getCallee();
@@ -1412,16 +1492,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
     return success();
 }
 
-LogicalResult printFuncPreProcess(CudaEmitter &emitter, func::FuncOp funcOp) {
-  raw_indented_ostream &os = emitter.ostream();
-
-
-
-  os << "__host__ void " << funcOp.getName().str() << "PreProcess() {\n";
-
-  return success();
-}
-
 LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   raw_indented_ostream &os = emitter.ostream();
   FunctionType funcType = funcOp.getFunctionType();
@@ -1429,6 +1499,12 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
   ArrayAttr resAttrs = funcOp.getResAttrsAttr();
 
   if (failed(emitter.trackValueLifetime(funcOp))) {
+    return failure();
+  }
+  if (failed(printFuncGlobalResorce(emitter, funcOp))) {
+    return failure();
+  }
+  if (failed(printFuncGlobalResorceSetup(emitter, funcOp))) {
     return failure();
   }
 #if 0
@@ -1488,7 +1564,9 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
 
   INFO("initialize ms for timing, if enabled")
   if (enableTiming) {
-    os << "float ms = 0.f;\n";
+    if (enableStreamAndEvent) {
+      os << "float ms = 0.f;\n";
+    }
     os << "float ms_total = 0.f;\n";
   }
 
@@ -1809,20 +1887,6 @@ std::string CudaEmitter::getConstantName(Value value) {
 LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
   //if op has result(all onnx op  has at least one output, so just a guard here)
   if (op.getNumResults()) {
-    INFO("SSA var declaration and shape decl if SSA is TensorType")
-    for (auto res : op.getResults()) {
-      if (failed(emitDeclaration(res))) {
-        return op.emitOpError("unable to declare ssa var.");
-      }
-      if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
-        if (failed(emitDeviceMalloc(res))) {
-          return op.emitOpError("unable to malloc ssa var.");
-        }
-        if(failed(emitPPLShapeDeclaration(res)) || failed(emitPPLShapeSetup(res))) {
-          return op.emitError("failed to emit ppl shape declaration!");
-        }
-      }
-    }
 
     //Name stream and event after res[0]. Declare and init stream and event for every ONNX op.
     if (enableStreamAndEvent) {
@@ -1867,9 +1931,10 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
         os << "cudaStreamDestroy(" << getStreamName(operand) << ");\n";
       }
       if (getValueLastUse(operand) == (&op)) {
-        if (failed(emitFree(operand))) {
-          return failure();
-        }
+        // globalized res do not need free
+        //if (failed(emitFree(operand))) {
+        //  return failure();
+        //}
         if (enableStreamAndEvent && operand.getDefiningOp()) {
           if (numRefCudaEvent(operand) == 1) {
             os << "cudaEventSynchronize(" << getEventName(operand) << ");\n";
@@ -1888,7 +1953,6 @@ LogicalResult CudaEmitter::emitONNXPostOp(Operation &op) {
       }
     }
   }
-  os << "\n\n";
 
   return success();
 }
@@ -1928,27 +1992,6 @@ LogicalResult CudaEmitter::emitFree(Value &value) {
   return success();
 }
 
-LogicalResult printFuncGlobalResorce(CudaEmitter &emitter, func::FuncOp funcOp) {
-  funcOp.walk([&](Operation *op){
-    //raw_indented_ostream &os = emitter.ostream();
-    //if op has result(all onnx op  has at least one output, so just a guard here)
-    if (op->getNumResults()) {
-      INFO("SSA var declaration and shape decl if SSA is TensorType")
-      for (auto res : op->getResults()) {
-        if (failed(emitter.emitDeclaration(res))) {
-          return;
-        }
-        if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
-          if(failed(emitter.emitPPLShapeDeclaration(res)) || failed(emitter.emitPPLShapeSetup(res))) {
-            return;
-          }
-        }
-      }
-    }
-  });
-  return failure();
-}
-
 LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) {
   LogicalResult status =
       llvm::TypeSwitch<Operation *, LogicalResult>(&op)
@@ -1960,7 +2003,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
           // ONNX ops.
           .Case<mlir::ONNXAbsOp,
                 mlir::ONNXAddOp, mlir::ONNXMulOp, mlir::ONNXDivOp, mlir::ONNXSubOp,
-                mlir::ONNXConcatOp, mlir::ONNXConstantOp, mlir::ONNXMaxPoolSingleOutOp,
+                mlir::ONNXConcatOp, mlir::ONNXMaxPoolSingleOutOp,
                 mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
                 mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op, mlir::ONNXTransposeOp,
                 mlir::ONNXConvOp,
@@ -1974,7 +2017,7 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 if (failed(emitONNXPostOp(*opop)))        { return failure(); }
                 return success();
           })
-          .Case<mlir::ONNXNoneOp>(
+          .Case<mlir::ONNXNoneOp, mlir::ONNXConstantOp>(
             [&](auto op) {
               Operation *opop = op.getOperation();
               if (failed(emitONNXPreOp(*opop)))         { return failure(); }
