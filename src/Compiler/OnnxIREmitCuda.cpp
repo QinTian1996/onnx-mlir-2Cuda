@@ -308,6 +308,8 @@ private:
 
 public:
   LogicalResult emitPPLShapeDeclaration(Value &value);
+  LogicalResult emitPPLShapeSetup(Value &value);
+
   std::string getPPLShapeName(Value &value) {
     return getOrCreateName(value) + "Shape";
   };
@@ -502,6 +504,21 @@ LogicalResult CudaEmitter::emitPPLShapeDeclaration(Value &value) {
   //Assumption: shape must be static(inferenced).
   std::string shapeName =  getPPLShapeName(value);
   os << "ppl::common::TensorShape " << shapeName << ";\n";
+
+
+  return success();
+}
+
+LogicalResult CudaEmitter::emitPPLShapeSetup(Value &value) {
+  TensorType tType = dyn_cast_if_present<TensorType>(value.getType());
+  if (!tType) {
+    return emitError(value.getLoc(), "value is not TensorType!");
+  }
+  if (tType.getNumDynamicDims()) {
+    return (os << "ERROR: Unsupported Dynamic Tensor!\n"), success();
+    return emitError(value.getLoc(), "cannot print dynamic tensor shape for ppl!");
+  }
+  std::string shapeName =  getPPLShapeName(value);
   os << shapeName << ".SetDimCount(" << tType.getRank() << ");\n";
   for (auto i = 0; i < tType.getRank(); i++) {
     os << shapeName << ".SetDim(" << i << ", " << tType.getDimSize(i) << ");\n";
@@ -511,7 +528,6 @@ LogicalResult CudaEmitter::emitPPLShapeDeclaration(Value &value) {
     return emitError(value.getLoc(), "fail to emit pplType!");
   }
   os << ");\n";
-
   return success();
 }
 
@@ -1396,10 +1412,6 @@ LogicalResult printOperation(CudaEmitter &emitter, func::ReturnOp returnOp) {
     return success();
 }
 
-LogicalResult printFuncGlobalResorce(CudaEmitter &emitter, func::FuncOp funcOp) {
-  return failure();
-}
-
 LogicalResult printFuncPreProcess(CudaEmitter &emitter, func::FuncOp funcOp) {
   raw_indented_ostream &os = emitter.ostream();
 
@@ -1493,7 +1505,7 @@ LogicalResult printOperation(CudaEmitter &emitter, func::FuncOp funcOp) {
 
   INFO("emit pplshape decl for func args")
   for (auto i : funcOp.getArguments()) {
-    if (failed(emitter.emitPPLShapeDeclaration(i))) {
+    if (failed(emitter.emitPPLShapeDeclaration(i)) || failed(emitter.emitPPLShapeSetup(i))) {
       return funcOp.emitOpError("emit func arg ppl shape decl failed!");
     }
   }
@@ -1806,7 +1818,7 @@ LogicalResult CudaEmitter::emitONNXPreOp (Operation &op) {
         if (failed(emitDeviceMalloc(res))) {
           return op.emitOpError("unable to malloc ssa var.");
         }
-        if(failed(emitPPLShapeDeclaration(res))) {
+        if(failed(emitPPLShapeDeclaration(res)) || failed(emitPPLShapeSetup(res))) {
           return op.emitError("failed to emit ppl shape declaration!");
         }
       }
@@ -1916,6 +1928,26 @@ LogicalResult CudaEmitter::emitFree(Value &value) {
   return success();
 }
 
+LogicalResult printFuncGlobalResorce(CudaEmitter &emitter, func::FuncOp funcOp) {
+  funcOp.walk([&](Operation *op){
+    //raw_indented_ostream &os = emitter.ostream();
+    //if op has result(all onnx op  has at least one output, so just a guard here)
+    if (op->getNumResults()) {
+      INFO("SSA var declaration and shape decl if SSA is TensorType")
+      for (auto res : op->getResults()) {
+        if (failed(emitter.emitDeclaration(res))) {
+          return;
+        }
+        if (auto tType = dyn_cast_if_present<TensorType>(res.getType())) {
+          if(failed(emitter.emitPPLShapeDeclaration(res)) || failed(emitter.emitPPLShapeSetup(res))) {
+            return;
+          }
+        }
+      }
+    }
+  });
+  return failure();
+}
 
 LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) {
   LogicalResult status =
