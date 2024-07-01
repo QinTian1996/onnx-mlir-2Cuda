@@ -53,7 +53,7 @@ using llvm::formatv;
 
 /// Options
 bool enableStreamAndEvent = false;
-bool useCustomPPL = false;
+bool useCustomPPL = true;
 bool enableTiming = true;
 
 /// Convenience functions to produce interleaved output with functions returning
@@ -1239,6 +1239,8 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   }
   os << "0};\n";
 
+  int NewChannel = input.getType().dyn_cast<TensorType>().getElementType().isInteger() ? 16 : 8;
+  os << "/* attension, this input`s channel will be expanded to " << NewChannel << "*/\n";
   // int conv(
   //     float *input, int *inputShape, int inputRank,
   //     float *output, int *outputShape, int outputRank,
@@ -1248,6 +1250,7 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   //     int group, 
   //     int *pads, int pads_rank,
   //     int *strides, int strides_rank
+  //     int NewChannel
   // );
   os << "conv(";                                                                //conv(
   os << emitter.getOrCreateName(input) << ", ";                                 // input
@@ -1270,7 +1273,10 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   os << (convOp.getPads().has_value() ? pads.size() : 1) << ", ";               // pads rank
   os << emitter.getOrCreateName(output) << stridesSuffix << ", ";               // strides
   os << (convOp.getStrides().has_value() ? strides.size() : 1);                 // strides rank
+#if 0
   os << ", " << emitter.getStreamName(output);                                  // stream
+#endif
+  os << ", " << NewChannel;                                                     // NewChannel
   os << ");\n";                                                                 //);
   return success();
 }
