@@ -528,6 +528,7 @@ LogicalResult CudaEmitter::emitPPLShapeSetup(Value &value) {
     return emitError(value.getLoc(), "fail to emit pplType!");
   }
   os << ");\n";
+  os << shapeName << ".SetDataFormat(ppl::common::DATAFORMAT_NDARRAY);\n";
   return success();
 }
 
@@ -555,6 +556,7 @@ static LogicalResult printCallOperation(CudaEmitter &emitter, Operation *callOp,
 void printFixedCode(CudaEmitter &emitter) {
   raw_indented_ostream &os = emitter.ostream();
   os << "#include <cuda_runtime.h>\n";
+  os << "#include <cuda_fp16.h>\n";
   os << "#include <cstdlib>\n";
   os << "#include <iostream>\n";
   os << "#include <vector>\n";
@@ -1115,7 +1117,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXSigmoidOp sigmoidOp
   os << "&" << emitter.getPPLShapeName(input)         << ", "; //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input)                << ", "; //  const void* input,
   os << "&" << emitter.getPPLShapeName(res)           << ", "; //  const ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(input)                       ; //  void* output,
+  os << emitter.getOrCreateName(res)                       ; //  void* output,
   os << ");\n";                                                //  const QuantKernelParamCuda* qparam = nullptr);
 
   return success();
@@ -1188,7 +1190,7 @@ LogicalResult printCustomConv(CudaEmitter &emitter, mlir::ONNXConvOp convOp) {
   raw_indented_ostream &os = emitter.ostream();
   Value input = convOp.getOperand(0);
   Value weight= convOp.getOperand(1);
-  Value bias = convOp.getNumOperands() > 2 ? convOp.getOperand(2) : NULL;
+  Value bias = convOp.getB();
   Value output = convOp.getResult();
   std::string inputStaticShapeName = emitter.getOrCreateName(output) + emitter.getPPLShapeName(input) + "StaticInput";
   std::string outputStaticShapeName = emitter.getOrCreateName(output) + emitter.getPPLShapeName(output) + "StaticOutput";
