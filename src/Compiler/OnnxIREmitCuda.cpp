@@ -568,6 +568,70 @@ LogicalResult printOperation(CudaEmitter &emitter,::mlir::ONNXAbsOp absOp) {
   return success();
 }
 
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXQuantizeLinearOp quan) {
+  raw_indented_ostream &os = emitter.ostream();
+  auto x = quan.getOperand(0);
+  auto scale = quan.getOperand(1);
+  auto zeroPoint = quan.getOperand(2);
+  auto y = quan.getResult();
+  auto tType = x.getType().dyn_cast<TensorType>();
+  int size = 1;
+
+  for (auto i = 0; i < tType.getRank(); i++) {
+    size *= tType.getDimSize(i);
+  }
+  /* quantize_linear<int8_t>(x, y_scale, y_zero_point_int8, y, size); */
+  // HACK: our model now only have int8 quantization.
+  os << "quantize_linear<int8_t>(\n";
+  os << emitter.getOrCreateName(x) << ",\n";
+  os << emitter.getConstantName(scale) <<",\n";
+  os << emitter.getConstantName(zeroPoint) << ",\n";
+  os << emitter.getOrCreateName(y) << ",\n";
+  os << size << ")\n";
+  return success();
+}
+
+LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXDequantizeLinearOp deQuan) {
+  raw_indented_ostream &os = emitter.ostream();
+  auto x = deQuan.getOperand(0);
+  auto scale = deQuan.getOperand(1);
+  auto zeroPoint = deQuan.getOperand(2);
+  auto y = deQuan.getResult();
+  auto tType = x.getType().dyn_cast<TensorType>();
+  int size = 1;
+
+  /* default 1, when there is not a axis all channel_idx = idx % 0 */
+  int channel = 1;
+  if (deQuan.getAxisAttr()) {
+    int axis = deQuan.getAxis();
+    channel = tType.getDimSize(axis);
+  }
+
+  for (auto i = 0; i < tType.getRank(); i++) {
+    size *= tType.getDimSize(i);
+  }
+
+  /* dequantize_linear(const int8_t* x,
+                      const float* x_scale,
+                      const int8_t* x_zero_point,
+                      float* y,
+                      int channels,
+                      int size) */
+  /* HACK: our model now only have int8 dequantization. */
+  os << "dequantize_linear(\n";
+  if (x.getDefiningOp() != NULL && x.getDefiningOp()->getName().getStringRef() == "onnx.Constant") {
+    os << emitter.getConstantName(x) << ",\n";
+  } else {
+    os << emitter.getOrCreateName(x) << ",\n";
+  }
+  os << emitter.getConstantName(scale) <<",\n";
+  os << emitter.getConstantName(zeroPoint) << ",\n";
+  os << emitter.getOrCreateName(y) << ",\n";
+  os << channel << ",\n";
+  os << size << ")\n";
+  return success();
+}
+
 LogicalResult printOperation(CudaEmitter &emitter, ONNXLeakyReluOp leakyReluOp) {
   raw_indented_ostream &os = emitter.ostream();
   Value x = leakyReluOp.getX();
@@ -1763,6 +1827,10 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
   if (hasPplOp("onnx.Abs") ||
       hasPplOp("onnx.Sigmoid")
     ) { emitter.emitInclude(prefix.str().append("unary/unary.h"), isLocal); }
+  if (hasPplOp("onnx.QuantizeLinear") ||
+      hasPplOp("onnx.DeQuantizeLinear")) {
+        emitter.emitInclude(prefix.str().append("quant/quant.h"), isLocal);
+  }
   if (hasPplOp("onnx.Custom")) { emitter.emitInclude(prefix.str().append("unary/swish.h"), isLocal); }
   if (hasPplOp("onnx.Concat")) { emitter.emitInclude(prefix.str().append("memory/concat.h"), isLocal); }
   if (hasPplOp("onnx.MaxPoolSingleOut")) { emitter.emitInclude(prefix.str().append("nn/pooling_max.h"), isLocal);}
@@ -2015,7 +2083,8 @@ LogicalResult CudaEmitter::emitOperation(Operation &op, bool trailingSemicolon) 
                 mlir::ONNXPowOp, mlir::ONNXReshapeOp, mlir::ONNXResizeV13Op,
                 mlir::ONNXSigmoidOp, mlir::ONNXSplitV13Op, mlir::ONNXTransposeOp,
                 mlir::ONNXConvOp,
-                mlir::ONNXCustomOp
+                mlir::ONNXCustomOp,
+                mlir::ONNXQuantizeLinearOp, mlir::ONNXDequantizeLinearOp
                 >(
               [&](auto op) {
                 Operation *opop = op.getOperation();
