@@ -771,12 +771,50 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXMaxPoolSingleOutOp maxPoo
   int stride[dims];
   int pad[dims];
 
-  for (size_t i = 0; i < dims; i++ ) {
-    kernel[i] = maxPoolSingleOutOp.getKernelShape().size() > i ? maxPoolSingleOutOp.getKernelShape()[i].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;
-    stride[i] = maxPoolSingleOutOp.getStrides().has_value() && maxPoolSingleOutOp.getStrides().value().size() > i ?
-      maxPoolSingleOutOp.getStrides().value()[i].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 1;
-    pad[i]    = maxPoolSingleOutOp.getPads().has_value()  &&  maxPoolSingleOutOp.getStrides().value().size() > i ?
-      maxPoolSingleOutOp.getPads().value()[i].dyn_cast<IntegerAttr>().getValue().getRawData()[0] : 0;
+  if (maxPoolSingleOutOp.getKernelShape().size() == 3) {
+    kernel[0] = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+    kernel[1] = maxPoolSingleOutOp.getKernelShape()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+    kernel[2] = maxPoolSingleOutOp.getKernelShape()[2].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+  } else if (maxPoolSingleOutOp.getKernelShape().size() == 2) {
+    kernel[0] = 1;
+    kernel[1] = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+    kernel[2] = maxPoolSingleOutOp.getKernelShape()[1].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+  } else {
+    kernel[0] = 1;
+    kernel[1] = 1;
+    kernel[2] = maxPoolSingleOutOp.getKernelShape()[0].dyn_cast<IntegerAttr>().getValue().getRawData()[0];
+  }
+
+  if (maxPoolSingleOutOp.getStrides().value().size() == 3) {
+    stride[0] = maxPoolSingleOutOp.getStrides().value()[0].cast<IntegerAttr>().getInt();
+    stride[1] = maxPoolSingleOutOp.getStrides().value()[1].cast<IntegerAttr>().getInt();
+    stride[2] = maxPoolSingleOutOp.getStrides().value()[2].cast<IntegerAttr>().getInt();
+  } else if (maxPoolSingleOutOp.getStrides().value().size() == 2) {
+    stride[0] = 1;
+    stride[1] = maxPoolSingleOutOp.getStrides().value()[0].cast<IntegerAttr>().getInt();
+    stride[2] = maxPoolSingleOutOp.getStrides().value()[1].cast<IntegerAttr>().getInt();
+  } else {
+    stride[0] = 1;
+    stride[1] = 1;
+    stride[2] = maxPoolSingleOutOp.getStrides().value()[0].cast<IntegerAttr>().getInt();
+  }
+
+  if ((maxPoolSingleOutOp.getPads().value().size() == 3 || maxPoolSingleOutOp.getPads().value().size() == 6) && maxPoolSingleOutOp.getKernelShape().size() == 3) {
+    pad[0] = maxPoolSingleOutOp.getPads().value()[0].cast<IntegerAttr>().getInt();
+    pad[1] = maxPoolSingleOutOp.getPads().value()[1].cast<IntegerAttr>().getInt();
+    pad[2] = maxPoolSingleOutOp.getPads().value()[2].cast<IntegerAttr>().getInt();
+  } else if ((maxPoolSingleOutOp.getPads().value().size() == 2 || maxPoolSingleOutOp.getPads().value().size() == 4) && maxPoolSingleOutOp.getKernelShape().size() == 2) {
+    pad[0] = 0;
+    pad[1] = maxPoolSingleOutOp.getPads().value()[0].cast<IntegerAttr>().getInt();
+    pad[2] = maxPoolSingleOutOp.getPads().value()[1].cast<IntegerAttr>().getInt();
+  } else if ((maxPoolSingleOutOp.getPads().value().size() == 1 || maxPoolSingleOutOp.getPads().value().size() == 2) && maxPoolSingleOutOp.getKernelShape().size() == 1) {
+    pad[0] = 0;
+    pad[1] = 0;
+    pad[2] = maxPoolSingleOutOp.getPads().value()[0].cast<IntegerAttr>().getInt();
+  } else {
+    pad[0] = 0;
+    pad[1] = 0;
+    pad[2] = 0;
   }
 
   os << "PPLCUDAMaxPoolingForwardImp(";  //ppl::common::RetCode PPLCUDAMaxPoolingForwardImp(
