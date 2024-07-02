@@ -1080,7 +1080,7 @@ LogicalResult printOperation(CudaEmitter &emitter, mlir::ONNXResizeV13Op resizeO
   os <<  "&" << emitter.getPPLShapeName(input) << ", ";           //  const ppl::common::TensorShape* input_shape,
   os << emitter.getOrCreateName(input) << ", ";                   //  const void* input,
   os <<  "&" << emitter.getPPLShapeName(res) << ", ";             //  const ppl::common::TensorShape* output_shape,
-  os << emitter.getOrCreateName(input) << ", ";                   //  void* outData,
+  os << emitter.getOrCreateName(res) << ", ";                   //  void* outData,
   os << "false" << ", ";                                          //  bool scale_pre_set,
   os << emitter.getConstantName(scales) << "[2], ";               //  float h_scale,
   os << emitter.getConstantName(scales) << "[3], ";               //  float w_scale,
@@ -1758,7 +1758,8 @@ void CudaEmitter::printPplInc(CudaEmitter &emitter) {
       hasPplOp("onnx.Mul") ||
       hasPplOp("onnx.Sub") ||
       hasPplOp("onnx.Div") ||
-      hasPplOp("onnx.Pow")
+      hasPplOp("onnx.Pow") ||
+      true //ppl need this inc even without arith op
     ) { emitter.emitInclude(prefix.str().append("arithmetic/arithmetic.h"), isLocal); }
   if (hasPplOp("onnx.Abs") ||
       hasPplOp("onnx.Sigmoid")
