@@ -1033,13 +1033,16 @@ LogicalResult printOperation(CudaEmitter &emitter, ONNXConstantOp constantOp) {
 #endif /* 0 */
 
   if (size) {
+    os << "void *" << emitter.getOrCreateName(res) << "temp = malloc(" << size << ");\n";
+    os << "memcpy(" << emitter.getOrCreateName(res) << "temp" << ", " << emitter.getConstantName(res) << ", " << size << ");\n";
+
     if (enableStreamAndEvent) {
       os << "cudaMemcpyAsync(";
     } else {
       os << "cudaMemcpy(";
     }
     os << emitter.getOrCreateName(res) << ", "; //dst
-    os << constName << ", "; //src
+    os << emitter.getOrCreateName(res) << "temp" << ", "; //src
     os << size << ", ";
     os << "cudaMemcpyHostToDevice";
     if (enableStreamAndEvent) {
